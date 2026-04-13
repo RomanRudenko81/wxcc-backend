@@ -56,13 +56,13 @@ app.get("/entrypoint/:id", async (req, res) => {
 
     const raw = await response.text();
 
-    console.log("⬅️ GET Status:", response.status);
-    console.log("⬅️ GET Raw:", raw);
+    console.log("⬅️ Status:", response.status);
+    console.log("⬅️ Raw Response:", raw);
 
     if (!response.ok) {
       return res.status(response.status).json({
         success: false,
-        error: "WxCC GET failed",
+        error: "WxCC API error",
         status: response.status,
         raw
       });
@@ -93,7 +93,7 @@ app.get("/entrypoint/:id", async (req, res) => {
 
 
 // =========================
-// PUT ENTRY POINT (FIXED SAFE VERSION)
+// PUT ENTRY POINT UPDATE
 // =========================
 app.put("/entrypoint/:id", async (req, res) => {
   const entryPointId = req.params.id;
@@ -113,9 +113,8 @@ app.put("/entrypoint/:id", async (req, res) => {
   try {
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
 
-    console.log("➡️ PUT WxCC URL:", url);
+    console.log("➡️ PUT WxCC:", url);
 
-    // ✅ ONLY allowed update fields (IMPORTANT FIX)
     const payload = {
       flowOverrideSettings: [
         {
@@ -131,7 +130,7 @@ app.put("/entrypoint/:id", async (req, res) => {
       ]
     };
 
-    console.log("📦 PUT Payload:", JSON.stringify(payload, null, 2));
+    console.log("📦 Payload:", JSON.stringify(payload, null, 2));
 
     const response = await fetch(url, {
       method: "PUT",
@@ -144,10 +143,9 @@ app.put("/entrypoint/:id", async (req, res) => {
 
     const raw = await response.text();
 
-    console.log("⬅️ PUT Status:", response.status);
-    console.log("⬅️ PUT Raw Response:", raw);
+    console.log("⬅️ Status:", response.status);
+    console.log("⬅️ Raw:", raw);
 
-    // ❌ ERROR HANDLING
     if (!response.ok) {
       return res.status(response.status).json({
         success: false,
@@ -157,7 +155,6 @@ app.put("/entrypoint/:id", async (req, res) => {
       });
     }
 
-    // ✅ SAFE JSON PARSE
     let data;
     try {
       data = JSON.parse(raw);
