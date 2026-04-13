@@ -1,126 +1,151 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Emergency Flow Control</title>
+<meta charset="UTF-8">
+<title>Supervisor Access Control</title>
 
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 40px;
-      max-width: 700px;
-      background: #f7f7f7;
-    }
+<style>
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #0b0f1a; /* darker Webex-like background */
+  color: #ffffff;
+}
 
-    .card {
-      background: white;
-      padding: 25px;
-      border-radius: 12px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-    }
+/* Container */
+.card {
+  max-width: 700px;
+  margin: 60px auto;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 14px;
+  padding: 25px;
+  backdrop-filter: blur(10px);
+}
 
-    input {
-      width: 100%;
-      padding: 10px;
-      margin: 10px 0;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-    }
+/* Headline */
+h2 {
+  color: #ffffff;
+  margin-bottom: 10px;
+}
 
-    button {
-      width: 100%;
-      padding: 12px;
-      background: #0078d4;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 16px;
-    }
+/* Entry Point text */
+p {
+  color: #c9d1d9;
+}
 
-    button:hover {
-      background: #005fa3;
-    }
+/* INPUT */
+input {
+  width: 100%;
+  padding: 12px;
+  margin-top: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.35);
+  color: white;
+  outline: none;
+}
 
-    /* Toggle Switch */
-    .switch {
-      position: relative;
-      display: inline-block;
-      width: 52px;
-      height: 28px;
-      margin-right: 10px;
-    }
+input::placeholder {
+  color: #9aa4b2;
+}
 
-    .switch input {
-      opacity: 0;
-      width: 0;
-      height: 0;
-    }
+/* BUTTON */
+button {
+  width: 100%;
+  padding: 12px;
+  margin-top: 15px;
+  border: none;
+  border-radius: 10px;
+  background: #0078d4; /* Webex blue */
+  color: white;
+  font-size: 15px;
+  cursor: pointer;
+  transition: 0.2s;
+}
 
-    .slider {
-      position: absolute;
-      cursor: pointer;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background-color: #ccc;
-      transition: .3s;
-      border-radius: 28px;
-    }
+button:hover {
+  background: #0a5ea8;
+}
 
-    .slider:before {
-      position: absolute;
-      content: "";
-      height: 20px;
-      width: 20px;
-      left: 4px;
-      bottom: 4px;
-      background-color: white;
-      transition: .3s;
-      border-radius: 50%;
-    }
+/* TOGGLE */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 26px;
+}
 
-    input:checked + .slider {
-      background-color: #28a745;
-    }
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
 
-    input:checked + .slider:before {
-      transform: translateX(24px);
-    }
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #3a3f4b;
+  transition: .3s;
+  border-radius: 26px;
+}
 
-    .row {
-      display: flex;
-      align-items: center;
-      margin: 15px 0;
-    }
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 4px;
+  bottom: 4px;
+  background-color: white;
+  transition: .3s;
+  border-radius: 50%;
+}
 
-    .status {
-      margin-top: 10px;
-      font-weight: bold;
-    }
+input:checked + .slider {
+  background-color: #22c55e;
+}
 
-    pre {
-      background: #111;
-      color: #0f0;
-      padding: 15px;
-      border-radius: 8px;
-      margin-top: 20px;
-      overflow-x: auto;
-    }
-  </style>
+input:checked + .slider:before {
+  transform: translateX(22px);
+}
+
+/* Row alignment */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 15px;
+}
+
+/* OUTPUT */
+pre {
+  margin-top: 20px;
+  background: #0a0f1a;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #00ff88;
+  overflow-x: auto;
+}
+
+/* Label */
+#stateLabel {
+  color: #ffffff;
+  font-weight: bold;
+}
+</style>
 </head>
 
 <body>
 
 <div class="card">
 
-  <h2>Emergency Flow Control</h2>
+  <h2>Supervisor Access Control</h2>
 
-  <!-- 🔴 FIXED ENTRY POINT (HARD CODED) -->
-  <p><b>Entry Point:</b> 284cd09a-eef4-40a2-82c6-53d08705e3e3</p>
+  <p>Conscia Support Demo</p>
 
-  <!-- Toggle -->
   <div class="row">
     <label class="switch">
       <input type="checkbox" id="emergencyToggle" onchange="updateLabel()">
@@ -130,23 +155,17 @@
     <span>Emergency Case: <span id="stateLabel">OFF</span></span>
   </div>
 
-  <!-- Prompt -->
-  <input id="prompt" placeholder="Emergency Prompt Text">
+  <input id="prompt" placeholder="Please enter new prompt text">
 
-  <!-- Button -->
   <button onclick="sendUpdate()">Update Entry Point</button>
 
-  <!-- Output -->
   <pre id="output">Ready...</pre>
 
 </div>
 
 <script>
-/* 🔴 FIXED ENTRY POINT ID */
-const ENTRY_POINT_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
-
-/* 🔴 Backend URL */
 const API_URL = "https://wxcc-backend.onrender.com";
+const ENTRY_POINT_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 
 function updateLabel() {
   const state = document.getElementById("emergencyToggle").checked;
@@ -157,22 +176,19 @@ async function sendUpdate() {
   const EmergencyCase = document.getElementById("emergencyToggle").checked;
   const EmergencyPrompt = document.getElementById("prompt").value;
 
-  const payload = {
-    EmergencyCase,
-    EmergencyPrompt
-  };
-
   try {
     const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        EmergencyCase,
+        EmergencyPrompt
+      })
     });
 
     const data = await res.json();
-
     document.getElementById("output").textContent =
       JSON.stringify(data, null, 2);
 
