@@ -177,7 +177,7 @@ async function sendUpdate() {
   const EmergencyPrompt = document.getElementById("prompt").value;
 
   try {
-    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
+    const res = await fetch(`${API_URL}/organization/c2e0792b-e4ea-4025-b456-7edc6d1c92cb/entry-point/${ENTRY_POINT_ID}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json"
