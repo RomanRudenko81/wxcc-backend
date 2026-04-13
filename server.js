@@ -56,29 +56,17 @@ app.get("/entrypoint/:id", async (req, res) => {
 
     const raw = await response.text();
 
-    console.log("⬅️ Status:", response.status);
-    console.log("⬅️ Raw Response:", raw);
+    console.log("⬅️ GET Status:", response.status);
 
     if (!response.ok) {
       return res.status(response.status).json({
         success: false,
-        error: "WxCC API error",
-        status: response.status,
+        error: "WxCC GET failed",
         raw
       });
     }
 
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return res.status(500).json({
-        success: false,
-        error: "Invalid JSON from WxCC",
-        raw
-      });
-    }
-
+    const data = JSON.parse(raw);
     return res.json(data);
 
   } catch (err) {
@@ -93,15 +81,11 @@ app.get("/entrypoint/:id", async (req, res) => {
 
 
 // =========================
-// PUT ENTRY POINT UPDATE
+// PUT ENTRY POINT (FIXED FULL OBJECT MERGE)
 // =========================
 app.put("/entrypoint/:id", async (req, res) => {
   const entryPointId = req.params.id;
   const { EmergencyCase, EmergencyPrompt } = req.body;
-
-  console.log("➡️ PUT Request received");
-  console.log("EntryPoint:", entryPointId);
-  console.log("Body:", req.body);
 
   if (!ACCESS_TOKEN) {
     return res.status(500).json({
@@ -113,38 +97,52 @@ app.put("/entrypoint/:id", async (req, res) => {
   try {
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
 
-    console.log("➡️ PUT WxCC:", url);
+    console.log("➡️ STEP 1 - GET current EntryPoint");
 
-    const payload = {
-      flowOverrideSettings: [
-        {
-          name: "EmergencyCase",
-          type: "BOOLEAN",
-          value: String(!!EmergencyCase)
-        },
-        {
-          name: "EmergencyPrompt",
-          type: "STRING",
-          value: EmergencyPrompt || ""
-        }
-      ]
-    };
+    // 🔥 STEP 1: GET full object
+    const getRes = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    });
 
-    console.log("📦 Payload:", JSON.stringify(payload, null, 2));
+    const entryPoint = await getRes.json();
 
+    console.log("⬅️ Current EntryPoint loaded");
+
+    // 🔥 STEP 2: Modify ONLY flowOverrideSettings
+    entryPoint.flowOverrideSettings = [
+      {
+        name: "EmergencyCase",
+        type: "BOOLEAN",
+        value: EmergencyCase ? "true" : "false"
+      },
+      {
+        name: "EmergencyPrompt",
+        type: "STRING",
+        value: EmergencyPrompt?.trim() || ""
+      }
+    ];
+
+    console.log("📦 FINAL PAYLOAD:");
+    console.log(JSON.stringify(entryPoint, null, 2));
+
+    // 🔥 STEP 3: PUT FULL OBJECT BACK
     const response = await fetch(url, {
       method: "PUT",
       headers: {
         "Authorization": `Bearer ${ACCESS_TOKEN}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(entryPoint)
     });
 
     const raw = await response.text();
 
-    console.log("⬅️ Status:", response.status);
-    console.log("⬅️ Raw:", raw);
+    console.log("⬅️ PUT Status:", response.status);
+    console.log("⬅️ PUT Raw:", raw);
 
     if (!response.ok) {
       return res.status(response.status).json({
@@ -155,17 +153,10 @@ app.put("/entrypoint/:id", async (req, res) => {
       });
     }
 
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = { raw };
-    }
-
     return res.json({
       success: true,
       status: response.status,
-      data
+      data: JSON.parse(raw)
     });
 
   } catch (err) {
