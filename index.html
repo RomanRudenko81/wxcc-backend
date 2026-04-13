@@ -1,175 +1,150 @@
-import express from "express";
-import cors from "cors";
-import fetch from "node-fetch";
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Supervisor Access Control</title>
 
-const app = express();
+<style>
+body {
+  margin: 0;
+  font-family: Arial;
+  background: #0b0f1a;
+  color: white;
+}
 
-app.use(cors());
-app.use(express.json());
+.card {
+  max-width: 700px;
+  margin: 60px auto;
+  padding: 25px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 14px;
+}
 
-// =========================
-// CONFIG
-// =========================
-const ACCESS_TOKEN = process.env.WXCC_TOKEN;
-const ORG_ID = "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
-const BASE_URL = "https://api.wxcc-eu2.cisco.com";
+input, button {
+  width: 100%;
+  padding: 12px;
+  margin-top: 10px;
+  border-radius: 10px;
+  border: none;
+}
 
-// =========================
-// HEALTH CHECK
-// =========================
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "wxcc-backend"
+button {
+  background: #0078d4;
+  color: white;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #0a5ea8;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.switch input {
+  transform: scale(1.5);
+}
+
+pre {
+  margin-top: 20px;
+  background: #0a0f1a;
+  padding: 10px;
+  border-radius: 10px;
+  color: #00ff88;
+  overflow: auto;
+}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+
+<h2>Supervisor Access Control</h2>
+
+<div class="row">
+  <label class="switch">
+    <input type="checkbox" id="toggle">
+  </label>
+  <span>Emergency Case: <span id="label">OFF</span></span>
+</div>
+
+<input id="prompt" placeholder="Emergency Prompt">
+
+<button onclick="update()">Update</button>
+
+<pre id="output">Loading...</pre>
+
+</div>
+
+<script>
+
+const API_URL = "https://wxcc-backend.onrender.com";
+const ENTRY_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
+
+// ======================
+// LOAD DATA (GET)
+// ======================
+async function load() {
+  try {
+    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_ID}`);
+    const data = await res.json();
+
+    const overrides = data.flowOverrideSettings || [];
+
+    const emergency = overrides.find(x => x.name === "EmergencyCase");
+    const prompt = overrides.find(x => x.name === "EmergencyPrompt");
+
+    const state = emergency?.value === "true";
+
+    document.getElementById("toggle").checked = state;
+    document.getElementById("label").innerText = state ? "ON" : "OFF";
+    document.getElementById("prompt").value = prompt?.value || "";
+
+    document.getElementById("output").textContent =
+      JSON.stringify(data, null, 2);
+
+  } catch (e) {
+    document.getElementById("output").textContent =
+      "ERROR: " + e.message;
+  }
+}
+
+// ======================
+// UPDATE (PUT)
+// ======================
+async function update() {
+  const EmergencyCase = document.getElementById("toggle").checked;
+  const EmergencyPrompt = document.getElementById("prompt").value;
+
+  const res = await fetch(`${API_URL}/entrypoint/${ENTRY_ID}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      EmergencyCase,
+      EmergencyPrompt
+    })
   });
+
+  const data = await res.json();
+
+  document.getElementById("output").textContent =
+    JSON.stringify(data, null, 2);
+}
+
+document.getElementById("toggle").addEventListener("change", (e) => {
+  document.getElementById("label").innerText =
+    e.target.checked ? "ON" : "OFF";
 });
 
-// =========================
-// GET ENTRY POINT (FIXED)
-// =========================
-app.get("/entrypoint/:id", async (req, res) => {
-  const entryPointId = req.params.id;
+load();
 
-  const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
+</script>
 
-  try {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    });
-
-    const text = await response.text();
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return res.status(500).json({
-        success: false,
-        error: "Webex returned non-JSON response",
-        raw: text
-      });
-    }
-
-    return res.status(response.status).json(data);
-
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-// =========================
-// PUT ENTRY POINT UPDATE (SAFE)
-// =========================
-app.put("/entrypoint/:id", async (req, res) => {
-  const entryPointId = req.params.id;
-  const { EmergencyCase, EmergencyPrompt } = req.body;
-
-  const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
-
-  try {
-    // 1. GET current entry point
-    const getRes = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`
-      }
-    });
-
-    const getText = await getRes.text();
-
-    let entryPoint;
-    try {
-      entryPoint = JSON.parse(getText);
-    } catch {
-      return res.status(500).json({
-        success: false,
-        step: "GET_PARSE_ERROR",
-        raw: getText
-      });
-    }
-
-    if (!getRes.ok) {
-      return res.status(getRes.status).json({
-        success: false,
-        step: "GET_FAILED",
-        data: entryPoint
-      });
-    }
-
-    // 2. update flowOverrideSettings safely
-    const updatedOverrides = (entryPoint.flowOverrideSettings || []).map(item => {
-      if (item.name === "EmergencyCase") {
-        return {
-          ...item,
-          value: String(!!EmergencyCase)
-        };
-      }
-
-      if (item.name === "EmergencyPrompt") {
-        return {
-          ...item,
-          value: EmergencyPrompt || ""
-        };
-      }
-
-      return item;
-    });
-
-    // 3. build full payload
-    const updatedPayload = {
-      ...entryPoint,
-      flowOverrideSettings: updatedOverrides
-    };
-
-    // remove read-only fields (IMPORTANT)
-    delete updatedPayload.id;
-    delete updatedPayload.createdTime;
-    delete updatedPayload.lastUpdatedTime;
-
-    // 4. PUT back to Webex
-    const putRes = await fetch(url, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${ACCESS_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(updatedPayload)
-    });
-
-    const putText = await putRes.text();
-
-    let putData;
-    try {
-      putData = JSON.parse(putText);
-    } catch {
-      putData = { raw: putText };
-    }
-
-    return res.status(putRes.status).json({
-      success: putRes.ok,
-      step: "PUT",
-      data: putData
-    });
-
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
-});
-
-// =========================
-// START SERVER
-// =========================
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 WXCC Backend running on port ${PORT}`);
-});
+</body>
+</html>
