@@ -13,7 +13,7 @@ const ACCESS_TOKEN = process.env.WXCC_TOKEN;
 // 🌍 Webex EU2 Base URL
 const BASE_URL = "https://api.wxcc-eu2.cisco.com";
 
-// 🧾 Org ID (dein Tenant)
+// 🧾 Org ID
 const ORG_ID = "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
 
 
@@ -56,13 +56,13 @@ app.get("/entrypoint/:id", async (req, res) => {
 
     const raw = await response.text();
 
-    console.log("⬅️ Status:", response.status);
-    console.log("⬅️ Raw Response:", raw);
+    console.log("⬅️ GET Status:", response.status);
+    console.log("⬅️ GET Raw:", raw);
 
     if (!response.ok) {
       return res.status(response.status).json({
         success: false,
-        error: "WxCC API error",
+        error: "WxCC GET failed",
         status: response.status,
         raw
       });
@@ -93,7 +93,7 @@ app.get("/entrypoint/:id", async (req, res) => {
 
 
 // =========================
-// PUT ENTRY POINT UPDATE
+// PUT ENTRY POINT (FIXED SAFE VERSION)
 // =========================
 app.put("/entrypoint/:id", async (req, res) => {
   const entryPointId = req.params.id;
@@ -113,8 +113,9 @@ app.put("/entrypoint/:id", async (req, res) => {
   try {
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
 
-    console.log("➡️ PUT WxCC:", url);
+    console.log("➡️ PUT WxCC URL:", url);
 
+    // ✅ ONLY allowed update fields (IMPORTANT FIX)
     const payload = {
       flowOverrideSettings: [
         {
@@ -130,7 +131,7 @@ app.put("/entrypoint/:id", async (req, res) => {
       ]
     };
 
-    console.log("📦 Payload:", JSON.stringify(payload, null, 2));
+    console.log("📦 PUT Payload:", JSON.stringify(payload, null, 2));
 
     const response = await fetch(url, {
       method: "PUT",
@@ -143,9 +144,10 @@ app.put("/entrypoint/:id", async (req, res) => {
 
     const raw = await response.text();
 
-    console.log("⬅️ Status:", response.status);
-    console.log("⬅️ Raw:", raw);
+    console.log("⬅️ PUT Status:", response.status);
+    console.log("⬅️ PUT Raw Response:", raw);
 
+    // ❌ ERROR HANDLING
     if (!response.ok) {
       return res.status(response.status).json({
         success: false,
@@ -155,6 +157,7 @@ app.put("/entrypoint/:id", async (req, res) => {
       });
     }
 
+    // ✅ SAFE JSON PARSE
     let data;
     try {
       data = JSON.parse(raw);
