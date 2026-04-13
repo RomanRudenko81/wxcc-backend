@@ -8,11 +8,10 @@
 body {
   margin: 0;
   font-family: Arial, sans-serif;
-  background: #0b0f1a; /* darker Webex-like background */
+  background: #0b0f1a;
   color: #ffffff;
 }
 
-/* Container */
 .card {
   max-width: 700px;
   margin: 60px auto;
@@ -23,18 +22,10 @@ body {
   backdrop-filter: blur(10px);
 }
 
-/* Headline */
-h2 {
-  color: #ffffff;
-  margin-bottom: 10px;
-}
+h2 { margin-bottom: 10px; }
 
-/* Entry Point text */
-p {
-  color: #c9d1d9;
-}
+p { color: #c9d1d9; }
 
-/* INPUT */
 input {
   width: 100%;
   padding: 12px;
@@ -46,29 +37,22 @@ input {
   outline: none;
 }
 
-input::placeholder {
-  color: #9aa4b2;
-}
-
-/* BUTTON */
 button {
   width: 100%;
   padding: 12px;
   margin-top: 15px;
   border: none;
   border-radius: 10px;
-  background: #0078d4; /* Webex blue */
+  background: #0078d4;
   color: white;
   font-size: 15px;
   cursor: pointer;
-  transition: 0.2s;
 }
 
 button:hover {
   background: #0a5ea8;
 }
 
-/* TOGGLE */
 .switch {
   position: relative;
   display: inline-block;
@@ -76,11 +60,7 @@ button:hover {
   height: 26px;
 }
 
-.switch input {
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
+.switch input { opacity: 0; width: 0; height: 0; }
 
 .slider {
   position: absolute;
@@ -111,7 +91,6 @@ input:checked + .slider:before {
   transform: translateX(22px);
 }
 
-/* Row alignment */
 .row {
   display: flex;
   align-items: center;
@@ -119,7 +98,6 @@ input:checked + .slider:before {
   margin-top: 15px;
 }
 
-/* OUTPUT */
 pre {
   margin-top: 20px;
   background: #0a0f1a;
@@ -130,9 +108,7 @@ pre {
   overflow-x: auto;
 }
 
-/* Label */
 #stateLabel {
-  color: #ffffff;
   font-weight: bold;
 }
 </style>
@@ -143,12 +119,11 @@ pre {
 <div class="card">
 
   <h2>Supervisor Access Control</h2>
-
   <p>Conscia Support Demo</p>
 
   <div class="row">
     <label class="switch">
-      <input type="checkbox" id="emergencyToggle" onchange="updateLabel()">
+      <input type="checkbox" id="emergencyToggle">
       <span class="slider"></span>
     </label>
 
@@ -159,7 +134,7 @@ pre {
 
   <button onclick="sendUpdate()">Update Channel</button>
 
-  <pre id="output">Ready...</pre>
+  <pre id="output">Loading...</pre>
 
 </div>
 
@@ -167,17 +142,60 @@ pre {
 const API_URL = "https://wxcc-backend.onrender.com";
 const ENTRY_POINT_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 
-function updateLabel() {
-  const state = document.getElementById("emergencyToggle").checked;
-  document.getElementById("stateLabel").innerText = state ? "ON" : "OFF";
+// =========================
+// INIT LOAD (GET)
+// =========================
+async function loadEntryPoint() {
+  try {
+    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`);
+    const data = await res.json();
+
+    console.log("GET EntryPoint:", data);
+
+    if (!data?.flowOverrideSettings) {
+      document.getElementById("output").textContent =
+        "No flowOverrideSettings found";
+      return;
+    }
+
+    // Extract values
+    const emergencyCase = data.flowOverrideSettings.find(x => x.name === "EmergencyCase");
+    const emergencyPrompt = data.flowOverrideSettings.find(x => x.name === "EmergencyPrompt");
+
+    const isOn = emergencyCase?.value === "true";
+
+    // Set UI state
+    document.getElementById("emergencyToggle").checked = isOn;
+    document.getElementById("stateLabel").innerText = isOn ? "ON" : "OFF";
+    document.getElementById("prompt").value = emergencyPrompt?.value || "";
+
+    document.getElementById("output").textContent =
+      JSON.stringify(data, null, 2);
+
+  } catch (err) {
+    console.error(err);
+    document.getElementById("output").textContent =
+      "GET error: " + err.message;
+  }
 }
 
+// =========================
+// UI UPDATE
+// =========================
+document.getElementById("emergencyToggle").addEventListener("change", () => {
+  const state = document.getElementById("emergencyToggle").checked;
+  document.getElementById("stateLabel").innerText = state ? "ON" : "OFF";
+});
+
+// =========================
+// PUT UPDATE
+// =========================
 async function sendUpdate() {
   const EmergencyCase = document.getElementById("emergencyToggle").checked;
   const EmergencyPrompt = document.getElementById("prompt").value;
 
   try {
-    console.log("Sending request...");
+    document.getElementById("output").textContent = "Updating...";
 
     const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
       method: "PUT",
@@ -190,20 +208,19 @@ async function sendUpdate() {
       })
     });
 
-    console.log("Response status:", res.status);
-
     const data = await res.json();
-    console.log("Response data:", data);
 
     document.getElementById("output").textContent =
       JSON.stringify(data, null, 2);
 
   } catch (err) {
-    console.error("FETCH ERROR:", err);
     document.getElementById("output").textContent =
-      "Error: " + err.message;
+      "PUT error: " + err.message;
   }
 }
+
+// INIT
+loadEntryPoint();
 </script>
 
 </body>
