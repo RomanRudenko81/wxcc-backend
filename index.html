@@ -177,7 +177,9 @@ async function sendUpdate() {
   const EmergencyPrompt = document.getElementById("prompt").value;
 
   try {
-    const res = await fetch(`${API_URL}/organization/c2e0792b-e4ea-4025-b456-7edc6d1c92cb/entry-point/${ENTRY_POINT_ID}`, {
+    console.log("Sending request...");
+
+    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json"
@@ -188,11 +190,16 @@ async function sendUpdate() {
       })
     });
 
+    console.log("Response status:", res.status);
+
     const data = await res.json();
+    console.log("Response data:", data);
+
     document.getElementById("output").textContent =
       JSON.stringify(data, null, 2);
 
   } catch (err) {
+    console.error("FETCH ERROR:", err);
     document.getElementById("output").textContent =
       "Error: " + err.message;
   }
