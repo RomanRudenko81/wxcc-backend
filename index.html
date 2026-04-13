@@ -1,227 +1,175 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Supervisor Access Control</title>
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
 
-<style>
-body {
-  margin: 0;
-  font-family: Arial, sans-serif;
-  background: #0b0f1a;
-  color: #ffffff;
-}
+const app = express();
 
-.card {
-  max-width: 700px;
-  margin: 60px auto;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 14px;
-  padding: 25px;
-  backdrop-filter: blur(10px);
-}
-
-h2 { margin-bottom: 10px; }
-
-p { color: #c9d1d9; }
-
-input {
-  width: 100%;
-  padding: 12px;
-  margin-top: 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.15);
-  background: rgba(0,0,0,0.35);
-  color: white;
-  outline: none;
-}
-
-button {
-  width: 100%;
-  padding: 12px;
-  margin-top: 15px;
-  border: none;
-  border-radius: 10px;
-  background: #0078d4;
-  color: white;
-  font-size: 15px;
-  cursor: pointer;
-}
-
-button:hover {
-  background: #0a5ea8;
-}
-
-.switch {
-  position: relative;
-  display: inline-block;
-  width: 48px;
-  height: 26px;
-}
-
-.switch input { opacity: 0; width: 0; height: 0; }
-
-.slider {
-  position: absolute;
-  cursor: pointer;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #3a3f4b;
-  transition: .3s;
-  border-radius: 26px;
-}
-
-.slider:before {
-  position: absolute;
-  content: "";
-  height: 18px;
-  width: 18px;
-  left: 4px;
-  bottom: 4px;
-  background-color: white;
-  transition: .3s;
-  border-radius: 50%;
-}
-
-input:checked + .slider {
-  background-color: #22c55e;
-}
-
-input:checked + .slider:before {
-  transform: translateX(22px);
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 15px;
-}
-
-pre {
-  margin-top: 20px;
-  background: #0a0f1a;
-  padding: 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.1);
-  color: #00ff88;
-  overflow-x: auto;
-}
-
-#stateLabel {
-  font-weight: bold;
-}
-</style>
-</head>
-
-<body>
-
-<div class="card">
-
-  <h2>Supervisor Access Control</h2>
-  <p>Conscia Support Demo</p>
-
-  <div class="row">
-    <label class="switch">
-      <input type="checkbox" id="emergencyToggle">
-      <span class="slider"></span>
-    </label>
-
-    <span>Emergency Case: <span id="stateLabel">OFF</span></span>
-  </div>
-
-  <input id="prompt" placeholder="Please enter new prompt text">
-
-  <button onclick="sendUpdate()">Update Channel</button>
-
-  <pre id="output">Loading...</pre>
-
-</div>
-
-<script>
-const API_URL = "https://wxcc-backend.onrender.com";
-const ENTRY_POINT_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
+app.use(cors());
+app.use(express.json());
 
 // =========================
-// INIT LOAD (GET)
+// CONFIG
 // =========================
-async function loadEntryPoint() {
-  try {
-    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`);
-    const data = await res.json();
-
-    console.log("GET EntryPoint:", data);
-
-    if (!data?.flowOverrideSettings) {
-      document.getElementById("output").textContent =
-        "No flowOverrideSettings found";
-      return;
-    }
-
-    // Extract values
-    const emergencyCase = data.flowOverrideSettings.find(x => x.name === "EmergencyCase");
-    const emergencyPrompt = data.flowOverrideSettings.find(x => x.name === "EmergencyPrompt");
-
-    const isOn = emergencyCase?.value === "true";
-
-    // Set UI state
-    document.getElementById("emergencyToggle").checked = isOn;
-    document.getElementById("stateLabel").innerText = isOn ? "ON" : "OFF";
-    document.getElementById("prompt").value = emergencyPrompt?.value || "";
-
-    document.getElementById("output").textContent =
-      JSON.stringify(data, null, 2);
-
-  } catch (err) {
-    console.error(err);
-    document.getElementById("output").textContent =
-      "GET error: " + err.message;
-  }
-}
+const ACCESS_TOKEN = process.env.WXCC_TOKEN;
+const ORG_ID = "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
+const BASE_URL = "https://api.wxcc-eu2.cisco.com";
 
 // =========================
-// UI UPDATE
+// HEALTH CHECK
 // =========================
-document.getElementById("emergencyToggle").addEventListener("change", () => {
-  const state = document.getElementById("emergencyToggle").checked;
-  document.getElementById("stateLabel").innerText = state ? "ON" : "OFF";
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "wxcc-backend"
+  });
 });
 
 // =========================
-// PUT UPDATE
+// GET ENTRY POINT (FIXED)
 // =========================
-async function sendUpdate() {
-  const EmergencyCase = document.getElementById("emergencyToggle").checked;
-  const EmergencyPrompt = document.getElementById("prompt").value;
+app.get("/entrypoint/:id", async (req, res) => {
+  const entryPointId = req.params.id;
+
+  const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
 
   try {
-    document.getElementById("output").textContent = "Updating...";
-
-    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
-      method: "PUT",
+    const response = await fetch(url, {
+      method: "GET",
       headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
         "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        EmergencyCase,
-        EmergencyPrompt
-      })
+      }
     });
 
-    const data = await res.json();
+    const text = await response.text();
 
-    document.getElementById("output").textContent =
-      JSON.stringify(data, null, 2);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        error: "Webex returned non-JSON response",
+        raw: text
+      });
+    }
+
+    return res.status(response.status).json(data);
 
   } catch (err) {
-    document.getElementById("output").textContent =
-      "PUT error: " + err.message;
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
-}
+});
 
-// INIT
-loadEntryPoint();
-</script>
+// =========================
+// PUT ENTRY POINT UPDATE (SAFE)
+// =========================
+app.put("/entrypoint/:id", async (req, res) => {
+  const entryPointId = req.params.id;
+  const { EmergencyCase, EmergencyPrompt } = req.body;
 
-</body>
-</html>
+  const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
+
+  try {
+    // 1. GET current entry point
+    const getRes = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`
+      }
+    });
+
+    const getText = await getRes.text();
+
+    let entryPoint;
+    try {
+      entryPoint = JSON.parse(getText);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        step: "GET_PARSE_ERROR",
+        raw: getText
+      });
+    }
+
+    if (!getRes.ok) {
+      return res.status(getRes.status).json({
+        success: false,
+        step: "GET_FAILED",
+        data: entryPoint
+      });
+    }
+
+    // 2. update flowOverrideSettings safely
+    const updatedOverrides = (entryPoint.flowOverrideSettings || []).map(item => {
+      if (item.name === "EmergencyCase") {
+        return {
+          ...item,
+          value: String(!!EmergencyCase)
+        };
+      }
+
+      if (item.name === "EmergencyPrompt") {
+        return {
+          ...item,
+          value: EmergencyPrompt || ""
+        };
+      }
+
+      return item;
+    });
+
+    // 3. build full payload
+    const updatedPayload = {
+      ...entryPoint,
+      flowOverrideSettings: updatedOverrides
+    };
+
+    // remove read-only fields (IMPORTANT)
+    delete updatedPayload.id;
+    delete updatedPayload.createdTime;
+    delete updatedPayload.lastUpdatedTime;
+
+    // 4. PUT back to Webex
+    const putRes = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(updatedPayload)
+    });
+
+    const putText = await putRes.text();
+
+    let putData;
+    try {
+      putData = JSON.parse(putText);
+    } catch {
+      putData = { raw: putText };
+    }
+
+    return res.status(putRes.status).json({
+      success: putRes.ok,
+      step: "PUT",
+      data: putData
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// =========================
+// START SERVER
+// =========================
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 WXCC Backend running on port ${PORT}`);
+});
