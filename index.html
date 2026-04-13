@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>WXCC Emergency Control</title>
+  <style>
+    body { font-family: Arial; margin: 40px; max-width: 600px; }
+    input, button { width: 100%; padding: 10px; margin: 8px 0; }
+    .card { border: 1px solid #ddd; padding: 20px; border-radius: 10px; }
+  </style>
+</head>
+
+<body>
+
+<h1>Emergency Flow Control</h1>
+
+<div class="card">
+
+  <input id="entryPointId" placeholder="284cd09a-eef4-40a2-82c6-53d08705e3e3">
+
+  <label>
+    <input type="checkbox" id="emergencyToggle">
+    Emergency Case aktiv
+  </label>
+
+  <input id="prompt" placeholder="Emergency Prompt">
+
+  <button onclick="update()">Update Entry Point</button>
+
+  <pre id="out">Ready</pre>
+
+</div>
+
+<script>
+const API = "https://wxcc-backend.onrender.com";
+
+function log(data) {
+  document.getElementById("out").textContent =
+    JSON.stringify(data, null, 2);
+}
+
+async function update() {
+  const entryPointId = document.getElementById("entryPointId").value;
+  const EmergencyCase = document.getElementById("emergencyToggle").checked;
+  const EmergencyPrompt = document.getElementById("prompt").value;
+
+  try {
+    const res = await fetch(`${API}/entrypoint/${entryPointId}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        EmergencyCase,
+        EmergencyPrompt
+      })
+    });
+
+    const data = await res.json();
+    log(data);
+
+  } catch (err) {
+    log({ error: err.message });
+  }
+}
+</script>
+
+</body>
+</html>
