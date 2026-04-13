@@ -10,8 +10,12 @@ app.use(express.json());
 // 🔐 ENV TOKEN (Render)
 const ACCESS_TOKEN = process.env.WXCC_TOKEN;
 
-// 🌍 Webex EU2 Base URL (wichtig!)
+// 🌍 Webex EU2 Base URL
 const BASE_URL = "https://api.wxcc-eu2.cisco.com";
+
+// 🧾 Org ID (dein Tenant)
+const ORG_ID = "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
+
 
 // =========================
 // HEALTH CHECK
@@ -23,15 +27,80 @@ app.get("/health", (req, res) => {
   });
 });
 
+
 // =========================
-// ENTRY POINT UPDATE
+// GET ENTRY POINT
+// =========================
+app.get("/entrypoint/:id", async (req, res) => {
+  const entryPointId = req.params.id;
+
+  if (!ACCESS_TOKEN) {
+    return res.status(500).json({
+      success: false,
+      error: "Missing WXCC_TOKEN in environment"
+    });
+  }
+
+  try {
+    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
+
+    console.log("➡️ GET EntryPoint:", url);
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    const raw = await response.text();
+
+    console.log("⬅️ Status:", response.status);
+    console.log("⬅️ Raw Response:", raw);
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        success: false,
+        error: "WxCC API error",
+        status: response.status,
+        raw
+      });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        error: "Invalid JSON from WxCC",
+        raw
+      });
+    }
+
+    return res.json(data);
+
+  } catch (err) {
+    console.error("❌ GET error:", err);
+
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+
+// =========================
+// PUT ENTRY POINT UPDATE
 // =========================
 app.put("/entrypoint/:id", async (req, res) => {
   const entryPointId = req.params.id;
   const { EmergencyCase, EmergencyPrompt } = req.body;
 
-  console.log("➡️ Incoming request");
-  console.log("EntryPoint ID:", entryPointId);
+  console.log("➡️ PUT Request received");
+  console.log("EntryPoint:", entryPointId);
   console.log("Body:", req.body);
 
   if (!ACCESS_TOKEN) {
@@ -42,9 +111,26 @@ app.put("/entrypoint/:id", async (req, res) => {
   }
 
   try {
-    const url = `${BASE_URL}/organization/c2e0792b-e4ea-4025-b456-7edc6d1c92cb/entry-point/${entryPointId}`;
+    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
 
-    console.log("➡️ Calling Webex API:", url);
+    console.log("➡️ PUT WxCC:", url);
+
+    const payload = {
+      flowOverrideSettings: [
+        {
+          name: "EmergencyCase",
+          type: "BOOLEAN",
+          value: String(!!EmergencyCase)
+        },
+        {
+          name: "EmergencyPrompt",
+          type: "STRING",
+          value: EmergencyPrompt || ""
+        }
+      ]
+    };
+
+    console.log("📦 Payload:", JSON.stringify(payload, null, 2));
 
     const response = await fetch(url, {
       method: "PUT",
@@ -52,42 +138,46 @@ app.put("/entrypoint/:id", async (req, res) => {
         "Authorization": `Bearer ${ACCESS_TOKEN}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        flowOverrideSettings: {
-          EmergencyCase: !!EmergencyCase,
-          EmergencyPrompt: EmergencyPrompt || ""
-        }
-      })
+      body: JSON.stringify(payload)
     });
 
     const raw = await response.text();
 
-    console.log("⬅️ Webex Status:", response.status);
-    console.log("⬅️ Webex Raw Response:", raw);
+    console.log("⬅️ Status:", response.status);
+    console.log("⬅️ Raw:", raw);
 
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      parsed = { raw };
+    if (!response.ok) {
+      return res.status(response.status).json({
+        success: false,
+        error: "WxCC update failed",
+        status: response.status,
+        raw
+      });
     }
 
-    return res.status(response.status).json({
-      success: response.ok,
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { raw };
+    }
+
+    return res.json({
+      success: true,
       status: response.status,
-      data: parsed
+      data
     });
 
   } catch (err) {
-    console.error("❌ Backend error:", err);
+    console.error("❌ PUT error:", err);
 
     return res.status(500).json({
       success: false,
-      error: "Backend exception",
-      message: err.message
+      error: err.message
     });
   }
 });
+
 
 // =========================
 // START SERVER
