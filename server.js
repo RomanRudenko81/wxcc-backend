@@ -29,7 +29,7 @@ let tokenStore = {
 // 🔐 LOGIN START
 // =========================
 app.get("/login", (req, res) => {
-  const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=spark:all%20cjp:config_read%20cjp:config_write%20cjp:user_read%20cjp:report_read`;
+  const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=spark:all`;
 
   res.redirect(url);
 });
