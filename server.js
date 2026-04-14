@@ -99,7 +99,7 @@ async function refreshAccessToken() {
 
   tokenStore = {
     access_token: data.access_token,
-    refresh_token: data.refresh_token, // ⚠️ Rotation!
+    refresh_token: data.refresh_token,
     expires_at: Date.now() + data.expires_in * 1000
   };
 
@@ -126,13 +126,13 @@ async function getValidToken() {
 }
 
 // =========================
-// 🆕 DEBUG TOKEN ROUTE (NEU)
+// 🆕 DEBUG TOKEN STATUS
 // =========================
 app.get("/debug/token", (req, res) => {
   if (!tokenStore.access_token) {
     return res.json({
       status: "❌ kein Token gespeichert",
-      tokenStore: tokenStore
+      tokenStore
     });
   }
 
@@ -143,6 +143,32 @@ app.get("/debug/token", (req, res) => {
     expires_at: tokenStore.expires_at,
     expires_in_seconds: Math.floor((tokenStore.expires_at - Date.now()) / 1000)
   });
+});
+
+// =========================
+// 🆕 DEBUG AUTH TEST (NEU - SCHRITT 1)
+// =========================
+app.get("/debug/auth", async (req, res) => {
+  try {
+    const token = await getValidToken();
+
+    if (!token) {
+      return res.json({
+        status: "❌ Kein Token verfügbar"
+      });
+    }
+
+    res.json({
+      status: "✅ Token wird korrekt geladen",
+      token_preview: token.substring(0, 25) + "..."
+    });
+
+  } catch (err) {
+    res.json({
+      status: "❌ Fehler beim Token Laden",
+      error: err.message
+    });
+  }
 });
 
 // =========================
