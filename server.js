@@ -126,6 +126,26 @@ async function getValidToken() {
 }
 
 // =========================
+// 🆕 DEBUG TOKEN ROUTE (NEU)
+// =========================
+app.get("/debug/token", (req, res) => {
+  if (!tokenStore.access_token) {
+    return res.json({
+      status: "❌ kein Token gespeichert",
+      tokenStore: tokenStore
+    });
+  }
+
+  res.json({
+    status: "✅ Token vorhanden",
+    access_token_exists: !!tokenStore.access_token,
+    refresh_token_exists: !!tokenStore.refresh_token,
+    expires_at: tokenStore.expires_at,
+    expires_in_seconds: Math.floor((tokenStore.expires_at - Date.now()) / 1000)
+  });
+});
+
+// =========================
 // HEALTH CHECK
 // =========================
 app.get("/health", (req, res) => {
@@ -151,7 +171,6 @@ app.get("/entrypoint/:id", async (req, res) => {
       }
     });
 
-    // 🔁 fallback bei 401
     if (response.status === 401) {
       const newToken = await refreshAccessToken();
 
@@ -183,7 +202,6 @@ app.put("/entrypoint/:id", async (req, res) => {
 
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
 
-    // STEP 1: GET
     const getRes = await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`
@@ -192,7 +210,6 @@ app.put("/entrypoint/:id", async (req, res) => {
 
     const entryPoint = await getRes.json();
 
-    // STEP 2: MODIFY
     entryPoint.flowOverrideSettings = [
       {
         name: "EmergencyCase",
@@ -206,7 +223,6 @@ app.put("/entrypoint/:id", async (req, res) => {
       }
     ];
 
-    // STEP 3: PUT
     const putRes = await fetch(url, {
       method: "PUT",
       headers: {
