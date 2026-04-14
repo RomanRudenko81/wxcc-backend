@@ -26,24 +26,20 @@ let tokenStore = {
 };
 
 // =========================
-// 🔐 LOGIN START + QUICK DEBUG
+// 🔐 LOGIN START
 // =========================
 app.get("/login", (req, res) => {
-  // 🔥 QUICK DEBUG (WICHTIG)
   console.log("===== LOGIN DEBUG =====");
   console.log("CLIENT_ID exists:", !!CLIENT_ID);
   console.log("REDIRECT_URI:", REDIRECT_URI);
   console.log("=======================");
 
-  // ❌ Hard check (damit du sofort Fehler siehst)
   if (!CLIENT_ID || !REDIRECT_URI) {
     return res.status(500).send(`
       ❌ ENV ERROR
 
       CLIENT_ID: ${CLIENT_ID}
       REDIRECT_URI: ${REDIRECT_URI}
-
-      👉 Render Environment Variables prüfen!
     `);
   }
 
@@ -166,21 +162,17 @@ app.get("/debug/token", (req, res) => {
 });
 
 // =========================
-// 🆕 DEBUG AUTH TEST
+// 🆕 DEBUG AUTH
 // =========================
 app.get("/debug/auth", async (req, res) => {
   try {
     const token = await getValidToken();
 
-    if (!token) {
-      return res.json({
-        status: "❌ Kein Token verfügbar"
-      });
-    }
+    console.log("AUTH TOKEN CHECK:", token ? "OK" : "NULL");
 
     res.json({
-      status: "✅ Token wird korrekt geladen",
-      token_preview: token.substring(0, 25) + "..."
+      status: "Token wird korrekt geladen",
+      token_preview: token ? token.substring(0, 25) + "..." : null
     });
 
   } catch (err) {
@@ -192,21 +184,19 @@ app.get("/debug/auth", async (req, res) => {
 });
 
 // =========================
-// HEALTH CHECK
-// =========================
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "wxcc-backend"
-  });
-});
-
-// =========================
-// GET ENTRY POINT
+// 🔥 ENTRYPOINT (BESTER FIX)
 // =========================
 app.get("/entrypoint/:id", async (req, res) => {
   try {
     const token = await getValidToken();
+
+    console.log("🔥 TOKEN USED:", token ? token.substring(0, 20) + "..." : "NULL");
+
+    if (!token) {
+      return res.status(401).json({
+        error: "No valid token"
+      });
+    }
 
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
 
@@ -217,24 +207,15 @@ app.get("/entrypoint/:id", async (req, res) => {
       }
     });
 
-    if (response.status === 401) {
-      const newToken = await refreshAccessToken();
+    const text = await response.text();
 
-      const retry = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${newToken}`,
-          "Content-Type": "application/json"
-        }
-      });
+    console.log("📡 STATUS:", response.status);
+    console.log("📡 BODY:", text);
 
-      const data = await retry.json();
-      return res.json(data);
-    }
-
-    const data = await response.json();
-    res.json(data);
+    return res.status(response.status).send(text);
 
   } catch (err) {
+    console.error("❌ ENTRYPOINT ERROR:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -284,6 +265,16 @@ app.put("/entrypoint/:id", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// =========================
+// HEALTH CHECK
+// =========================
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "wxcc-backend"
+  });
 });
 
 // =========================
