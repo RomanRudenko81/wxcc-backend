@@ -26,10 +26,30 @@ let tokenStore = {
 };
 
 // =========================
-// 🔐 LOGIN START
+// 🔐 LOGIN START + QUICK DEBUG
 // =========================
 app.get("/login", (req, res) => {
+  // 🔥 QUICK DEBUG (WICHTIG)
+  console.log("===== LOGIN DEBUG =====");
+  console.log("CLIENT_ID exists:", !!CLIENT_ID);
+  console.log("REDIRECT_URI:", REDIRECT_URI);
+  console.log("=======================");
+
+  // ❌ Hard check (damit du sofort Fehler siehst)
+  if (!CLIENT_ID || !REDIRECT_URI) {
+    return res.status(500).send(`
+      ❌ ENV ERROR
+
+      CLIENT_ID: ${CLIENT_ID}
+      REDIRECT_URI: ${REDIRECT_URI}
+
+      👉 Render Environment Variables prüfen!
+    `);
+  }
+
   const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=spark:all`;
+
+  console.log("➡️ Redirect URL:", url);
 
   res.redirect(url);
 });
@@ -146,7 +166,7 @@ app.get("/debug/token", (req, res) => {
 });
 
 // =========================
-// 🆕 DEBUG AUTH TEST (NEU - SCHRITT 1)
+// 🆕 DEBUG AUTH TEST
 // =========================
 app.get("/debug/auth", async (req, res) => {
   try {
