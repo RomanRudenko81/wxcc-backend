@@ -7,15 +7,123 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔐 ENV TOKEN (Render)
-const ACCESS_TOKEN = process.env.WXCC_TOKEN;
-
-// 🌍 Webex EU2 Base URL
+// 🌍 Webex (EU2 bleibt gleich!)
 const BASE_URL = "https://api.wxcc-eu2.cisco.com";
-
-// 🧾 Org ID
 const ORG_ID = "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
 
+// 🔐 ENV
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const REDIRECT_URI = process.env.REDIRECT_URI;
+
+// =========================
+// 🧠 TOKEN STORE (temporär)
+// =========================
+let tokenStore = {
+  access_token: null,
+  refresh_token: null,
+  expires_at: null
+};
+
+// =========================
+// 🔐 LOGIN START
+// =========================
+app.get("/login", (req, res) => {
+  const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=spark:all`;
+
+  res.redirect(url);
+});
+
+// =========================
+// 🔁 CALLBACK (CODE → TOKEN)
+// =========================
+app.get("/callback", async (req, res) => {
+  const code = req.query.code;
+
+  if (!code) {
+    return res.send("❌ Kein Code erhalten");
+  }
+
+  try {
+    const response = await fetch("https://webexapis.com/v1/access_token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        code: code,
+        redirect_uri: REDIRECT_URI
+      })
+    });
+
+    const data = await response.json();
+
+    tokenStore = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: Date.now() + data.expires_in * 1000
+    };
+
+    console.log("✅ Token gespeichert");
+
+    res.send("✅ Login erfolgreich! Token gespeichert.");
+  } catch (err) {
+    console.error(err);
+    res.send("❌ Fehler beim Token holen");
+  }
+});
+
+// =========================
+// 🔄 REFRESH TOKEN
+// =========================
+async function refreshAccessToken() {
+  console.log("🔄 Refreshing token...");
+
+  const response = await fetch("https://webexapis.com/v1/access_token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      refresh_token: tokenStore.refresh_token
+    })
+  });
+
+  const data = await response.json();
+
+  tokenStore = {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token, // ⚠️ Rotation!
+    expires_at: Date.now() + data.expires_in * 1000
+  };
+
+  console.log("✅ Token refreshed");
+
+  return tokenStore.access_token;
+}
+
+// =========================
+// 🧠 VALID TOKEN HOLEN
+// =========================
+async function getValidToken() {
+  if (!tokenStore.access_token) {
+    throw new Error("Nicht eingeloggt → /login aufrufen");
+  }
+
+  const now = Date.now();
+
+  if (now >= tokenStore.expires_at - 60000) {
+    return await refreshAccessToken();
+  }
+
+  return tokenStore.access_token;
+}
 
 // =========================
 // HEALTH CHECK
@@ -27,148 +135,94 @@ app.get("/health", (req, res) => {
   });
 });
 
-
 // =========================
 // GET ENTRY POINT
 // =========================
 app.get("/entrypoint/:id", async (req, res) => {
-  const entryPointId = req.params.id;
-
-  if (!ACCESS_TOKEN) {
-    return res.status(500).json({
-      success: false,
-      error: "Missing WXCC_TOKEN in environment"
-    });
-  }
-
   try {
-    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
+    const token = await getValidToken();
 
-    console.log("➡️ GET EntryPoint:", url);
+    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
 
     const response = await fetch(url, {
-      method: "GET",
       headers: {
-        "Authorization": `Bearer ${ACCESS_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
       }
     });
 
-    const raw = await response.text();
+    // 🔁 fallback bei 401
+    if (response.status === 401) {
+      const newToken = await refreshAccessToken();
 
-    console.log("⬅️ GET Status:", response.status);
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        success: false,
-        error: "WxCC GET failed",
-        raw
+      const retry = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${newToken}`,
+          "Content-Type": "application/json"
+        }
       });
+
+      const data = await retry.json();
+      return res.json(data);
     }
 
-    const data = JSON.parse(raw);
-    return res.json(data);
+    const data = await response.json();
+    res.json(data);
 
   } catch (err) {
-    console.error("❌ GET error:", err);
-
-    return res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    res.status(500).json({ error: err.message });
   }
 });
 
-
 // =========================
-// PUT ENTRY POINT (FIXED FULL OBJECT MERGE)
+// PUT ENTRY POINT
 // =========================
 app.put("/entrypoint/:id", async (req, res) => {
-  const entryPointId = req.params.id;
-  const { EmergencyCase, EmergencyPrompt } = req.body;
-
-  if (!ACCESS_TOKEN) {
-    return res.status(500).json({
-      success: false,
-      error: "Missing WXCC_TOKEN in environment"
-    });
-  }
-
   try {
-    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${entryPointId}`;
+    const token = await getValidToken();
 
-    console.log("➡️ STEP 1 - GET current EntryPoint");
+    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
 
-    // 🔥 STEP 1: GET full object
+    // STEP 1: GET
     const getRes = await fetch(url, {
-      method: "GET",
       headers: {
-        "Authorization": `Bearer ${ACCESS_TOKEN}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${token}`
       }
     });
 
     const entryPoint = await getRes.json();
 
-    console.log("⬅️ Current EntryPoint loaded");
-
-    // 🔥 STEP 2: Modify ONLY flowOverrideSettings
+    // STEP 2: MODIFY
     entryPoint.flowOverrideSettings = [
       {
         name: "EmergencyCase",
         type: "BOOLEAN",
-        value: EmergencyCase ? "true" : "false"
+        value: req.body.EmergencyCase ? "true" : "false"
       },
       {
         name: "EmergencyPrompt",
         type: "STRING",
-        value: EmergencyPrompt?.trim() || ""
+        value: req.body.EmergencyPrompt?.trim() || ""
       }
     ];
 
-    console.log("📦 FINAL PAYLOAD:");
-    console.log(JSON.stringify(entryPoint, null, 2));
-
-    // 🔥 STEP 3: PUT FULL OBJECT BACK
-    const response = await fetch(url, {
+    // STEP 3: PUT
+    const putRes = await fetch(url, {
       method: "PUT",
       headers: {
-        "Authorization": `Bearer ${ACCESS_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(entryPoint)
     });
 
-    const raw = await response.text();
-
-    console.log("⬅️ PUT Status:", response.status);
-    console.log("⬅️ PUT Raw:", raw);
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        success: false,
-        error: "WxCC update failed",
-        status: response.status,
-        raw
-      });
-    }
-
-    return res.json({
-      success: true,
-      status: response.status,
-      data: JSON.parse(raw)
-    });
+    const data = await putRes.json();
+    res.json(data);
 
   } catch (err) {
-    console.error("❌ PUT error:", err);
-
-    return res.status(500).json({
-      success: false,
-      error: err.message
-    });
+    res.status(500).json({ error: err.message });
   }
 });
-
 
 // =========================
 // START SERVER
