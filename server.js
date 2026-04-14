@@ -145,19 +145,14 @@ async function getValidToken() {
 // 🆕 DEBUG TOKEN STATUS
 // =========================
 app.get("/debug/token", (req, res) => {
-  if (!tokenStore.access_token) {
-    return res.json({
-      status: "❌ kein Token gespeichert",
-      tokenStore
-    });
-  }
-
   res.json({
-    status: "✅ Token vorhanden",
+    status: tokenStore.access_token ? "✅ Token vorhanden" : "❌ kein Token gespeichert",
     access_token_exists: !!tokenStore.access_token,
     refresh_token_exists: !!tokenStore.refresh_token,
     expires_at: tokenStore.expires_at,
-    expires_in_seconds: Math.floor((tokenStore.expires_at - Date.now()) / 1000)
+    expires_in_seconds: tokenStore.expires_at
+      ? Math.floor((tokenStore.expires_at - Date.now()) / 1000)
+      : null
   });
 });
 
@@ -168,37 +163,47 @@ app.get("/debug/auth", async (req, res) => {
   try {
     const token = await getValidToken();
 
-    console.log("AUTH TOKEN CHECK:", token ? "OK" : "NULL");
-
     res.json({
-      status: "Token wird korrekt geladen",
-      token_preview: token ? token.substring(0, 25) + "..." : null
+      status: "Token OK",
+      token_preview: token?.substring(0, 25)
     });
 
   } catch (err) {
     res.json({
-      status: "❌ Fehler beim Token Laden",
+      status: "ERROR",
       error: err.message
     });
   }
 });
 
 // =========================
-// 🔥 ENTRYPOINT (BESTER FIX)
+// 🔥🔥 HARD DIAGNOSIS ENTRYPOINT
 // =========================
 app.get("/entrypoint/:id", async (req, res) => {
   try {
+    console.log("===================================");
+    console.log("🔥 ENTRYPOINT HARD DIAGNOSIS START");
+    console.log("===================================");
+
     const token = await getValidToken();
 
-    console.log("🔥 TOKEN USED:", token ? token.substring(0, 20) + "..." : "NULL");
+    console.log("TOKEN TYPE:", typeof token);
+    console.log("TOKEN VALUE:", token);
+    console.log("TOKEN LENGTH:", token?.length);
 
-    if (!token) {
-      return res.status(401).json({
-        error: "No valid token"
+    if (!token || typeof token !== "string") {
+      console.log("❌ TOKEN INVALID DETECTED");
+
+      return res.status(500).json({
+        error: "TOKEN INVALID",
+        token_type: typeof token,
+        token_value: token
       });
     }
 
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
+
+    console.log("CALL URL:", url);
 
     const response = await fetch(url, {
       headers: {
@@ -209,14 +214,22 @@ app.get("/entrypoint/:id", async (req, res) => {
 
     const text = await response.text();
 
-    console.log("📡 STATUS:", response.status);
-    console.log("📡 BODY:", text);
+    console.log("RESPONSE STATUS:", response.status);
+    console.log("RESPONSE BODY:", text);
+
+    console.log("===================================");
+    console.log("🔥 ENTRYPOINT HARD DIAGNOSIS END");
+    console.log("===================================");
 
     return res.status(response.status).send(text);
 
   } catch (err) {
-    console.error("❌ ENTRYPOINT ERROR:", err);
-    res.status(500).json({ error: err.message });
+    console.error("🔥 FATAL ENTRYPOINT ERROR:", err);
+
+    res.status(500).json({
+      error: err.message,
+      stack: err.stack
+    });
   }
 });
 
