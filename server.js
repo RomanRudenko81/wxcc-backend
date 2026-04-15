@@ -43,7 +43,10 @@ app.get("/login", (req, res) => {
     `);
   }
 
-  const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=cjp:config cjp:config_write cjp:config_read cjp:user spark:people_read cjds:admin_org_read cjds:admin_org_write cloud-contact-center:pod_conv cjp:task_write cjp:task_read applications_token`;
+  // ✅ FIXED SCOPE + ENCODING
+  const scope = encodeURIComponent("cjp:config_read cjp:config_write");
+
+  const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=${scope}`;
 
   console.log("➡️ Redirect URL:", url);
 
@@ -77,6 +80,13 @@ app.get("/callback", async (req, res) => {
 
     const data = await response.json();
 
+    // ✅ DEBUG FIX
+    console.log("🔍 TOKEN RESPONSE:", data);
+
+    if (!data.access_token) {
+      return res.send("❌ Token Fehler: " + JSON.stringify(data));
+    }
+
     tokenStore = {
       access_token: data.access_token,
       refresh_token: data.refresh_token,
@@ -86,6 +96,7 @@ app.get("/callback", async (req, res) => {
     console.log("✅ Token gespeichert");
 
     res.send("✅ Login erfolgreich! Token gespeichert.");
+
   } catch (err) {
     console.error(err);
     res.send("❌ Fehler beim Token holen");
@@ -112,6 +123,12 @@ async function refreshAccessToken() {
   });
 
   const data = await response.json();
+
+  console.log("🔍 REFRESH RESPONSE:", data);
+
+  if (!data.access_token) {
+    throw new Error("Refresh failed: " + JSON.stringify(data));
+  }
 
   tokenStore = {
     access_token: data.access_token,
@@ -177,33 +194,13 @@ app.get("/debug/auth", async (req, res) => {
 });
 
 // =========================
-// 🔥🔥 HARD DIAGNOSIS ENTRYPOINT
+// 🔥 ENTRYPOINT GET
 // =========================
 app.get("/entrypoint/:id", async (req, res) => {
   try {
-    console.log("===================================");
-    console.log("🔥 ENTRYPOINT HARD DIAGNOSIS START");
-    console.log("===================================");
-
     const token = await getValidToken();
 
-    console.log("TOKEN TYPE:", typeof token);
-    console.log("TOKEN VALUE:", token);
-    console.log("TOKEN LENGTH:", token?.length);
-
-    if (!token || typeof token !== "string") {
-      console.log("❌ TOKEN INVALID DETECTED");
-
-      return res.status(500).json({
-        error: "TOKEN INVALID",
-        token_type: typeof token,
-        token_value: token
-      });
-    }
-
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
-
-    console.log("CALL URL:", url);
 
     const response = await fetch(url, {
       headers: {
@@ -217,18 +214,11 @@ app.get("/entrypoint/:id", async (req, res) => {
     console.log("RESPONSE STATUS:", response.status);
     console.log("RESPONSE BODY:", text);
 
-    console.log("===================================");
-    console.log("🔥 ENTRYPOINT HARD DIAGNOSIS END");
-    console.log("===================================");
-
     return res.status(response.status).send(text);
 
   } catch (err) {
-    console.error("🔥 FATAL ENTRYPOINT ERROR:", err);
-
     res.status(500).json({
-      error: err.message,
-      stack: err.stack
+      error: err.message
     });
   }
 });
