@@ -43,7 +43,7 @@ app.get("/login", (req, res) => {
     `);
   }
 
-  const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=spark:cjp:config cjp:config_write cjp:config_read cjp:user spark:people_read cjds:admin_org_read cjds:admin_org_write cloud-contact-center:pod_conv cjp:task_write cjp:task_read applications_token`;
+  const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=cjp:config cjp:config_write cjp:config_read cjp:user spark:people_read cjds:admin_org_read cjds:admin_org_write cloud-contact-center:pod_conv cjp:task_write cjp:task_read applications_token`;
 
   console.log("➡️ Redirect URL:", url);
 
