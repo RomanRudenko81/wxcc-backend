@@ -1,13 +1,14 @@
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import fs from "fs";
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// 🌍 Webex (EU2 bleibt gleich!)
+// 🌍 Webex
 const BASE_URL = "https://api.wxcc-eu2.cisco.com";
 const ORG_ID = "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
 
@@ -16,8 +17,11 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const REDIRECT_URI = process.env.REDIRECT_URI;
 
+// 📁 Token File
+const TOKEN_FILE = "token.json";
+
 // =========================
-// 🧠 TOKEN STORE (temporär)
+// 🧠 TOKEN STORE
 // =========================
 let tokenStore = {
   access_token: null,
@@ -26,35 +30,48 @@ let tokenStore = {
 };
 
 // =========================
-// 🔐 LOGIN START
+// 💾 LOAD TOKEN
+// =========================
+function loadToken() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const data = fs.readFileSync(TOKEN_FILE);
+      tokenStore = JSON.parse(data);
+      console.log("🔁 Token aus Datei geladen");
+    }
+  } catch (err) {
+    console.error("❌ Fehler beim Laden des Tokens:", err);
+  }
+}
+
+// =========================
+// 💾 SAVE TOKEN
+// =========================
+function saveToken() {
+  try {
+    fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokenStore, null, 2));
+    console.log("💾 Token gespeichert");
+  } catch (err) {
+    console.error("❌ Fehler beim Speichern:", err);
+  }
+}
+
+// Beim Start laden
+loadToken();
+
+// =========================
+// 🔐 LOGIN
 // =========================
 app.get("/login", (req, res) => {
-  console.log("===== LOGIN DEBUG =====");
-  console.log("CLIENT_ID exists:", !!CLIENT_ID);
-  console.log("REDIRECT_URI:", REDIRECT_URI);
-  console.log("=======================");
-
-  if (!CLIENT_ID || !REDIRECT_URI) {
-    return res.status(500).send(`
-      ❌ ENV ERROR
-
-      CLIENT_ID: ${CLIENT_ID}
-      REDIRECT_URI: ${REDIRECT_URI}
-    `);
-  }
-
-  // ✅ FIXED SCOPE + ENCODING
   const scope = encodeURIComponent("cjp:config_read cjp:config_write");
 
   const url = `https://webexapis.com/v1/authorize?client_id=${CLIENT_ID}&response_type=code&redirect_uri=${REDIRECT_URI}&scope=${scope}`;
-
-  console.log("➡️ Redirect URL:", url);
 
   res.redirect(url);
 });
 
 // =========================
-// 🔁 CALLBACK (CODE → TOKEN)
+// 🔁 CALLBACK
 // =========================
 app.get("/callback", async (req, res) => {
   const code = req.query.code;
@@ -73,14 +90,13 @@ app.get("/callback", async (req, res) => {
         grant_type: "authorization_code",
         client_id: CLIENT_ID,
         client_secret: CLIENT_SECRET,
-        code: code,
+        code,
         redirect_uri: REDIRECT_URI
       })
     });
 
     const data = await response.json();
 
-    // ✅ DEBUG FIX
     console.log("🔍 TOKEN RESPONSE:", data);
 
     if (!data.access_token) {
@@ -93,9 +109,9 @@ app.get("/callback", async (req, res) => {
       expires_at: Date.now() + data.expires_in * 1000
     };
 
-    console.log("✅ Token gespeichert");
+    saveToken();
 
-    res.send("✅ Login erfolgreich! Token gespeichert.");
+    res.send("✅ Login erfolgreich & gespeichert!");
 
   } catch (err) {
     console.error(err);
@@ -136,17 +152,17 @@ async function refreshAccessToken() {
     expires_at: Date.now() + data.expires_in * 1000
   };
 
-  console.log("✅ Token refreshed");
+  saveToken();
 
   return tokenStore.access_token;
 }
 
 // =========================
-// 🧠 VALID TOKEN HOLEN
+// 🧠 VALID TOKEN
 // =========================
 async function getValidToken() {
   if (!tokenStore.access_token) {
-    throw new Error("Nicht eingeloggt → /login aufrufen");
+    throw new Error("Nicht eingeloggt → /login");
   }
 
   const now = Date.now();
@@ -159,42 +175,19 @@ async function getValidToken() {
 }
 
 // =========================
-// 🆕 DEBUG TOKEN STATUS
+// DEBUG
 // =========================
 app.get("/debug/token", (req, res) => {
   res.json({
-    status: tokenStore.access_token ? "✅ Token vorhanden" : "❌ kein Token gespeichert",
-    access_token_exists: !!tokenStore.access_token,
-    refresh_token_exists: !!tokenStore.refresh_token,
-    expires_at: tokenStore.expires_at,
-    expires_in_seconds: tokenStore.expires_at
+    status: tokenStore.access_token ? "✅ vorhanden" : "❌ fehlt",
+    expires_in: tokenStore.expires_at
       ? Math.floor((tokenStore.expires_at - Date.now()) / 1000)
       : null
   });
 });
 
 // =========================
-// 🆕 DEBUG AUTH
-// =========================
-app.get("/debug/auth", async (req, res) => {
-  try {
-    const token = await getValidToken();
-
-    res.json({
-      status: "Token OK",
-      token_preview: token?.substring(0, 25)
-    });
-
-  } catch (err) {
-    res.json({
-      status: "ERROR",
-      error: err.message
-    });
-  }
-});
-
-// =========================
-// 🔥 ENTRYPOINT GET
+// ENTRYPOINT GET
 // =========================
 app.get("/entrypoint/:id", async (req, res) => {
   try {
@@ -204,66 +197,16 @@ app.get("/entrypoint/:id", async (req, res) => {
 
     const response = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${token}`
       }
     });
 
     const text = await response.text();
 
-    console.log("RESPONSE STATUS:", response.status);
-    console.log("RESPONSE BODY:", text);
+    console.log("STATUS:", response.status);
+    console.log("BODY:", text);
 
-    return res.status(response.status).send(text);
-
-  } catch (err) {
-    res.status(500).json({
-      error: err.message
-    });
-  }
-});
-
-// =========================
-// PUT ENTRY POINT
-// =========================
-app.put("/entrypoint/:id", async (req, res) => {
-  try {
-    const token = await getValidToken();
-
-    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
-
-    const getRes = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    });
-
-    const entryPoint = await getRes.json();
-
-    entryPoint.flowOverrideSettings = [
-      {
-        name: "EmergencyCase",
-        type: "BOOLEAN",
-        value: req.body.EmergencyCase ? "true" : "false"
-      },
-      {
-        name: "EmergencyPrompt",
-        type: "STRING",
-        value: req.body.EmergencyPrompt?.trim() || ""
-      }
-    ];
-
-    const putRes = await fetch(url, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(entryPoint)
-    });
-
-    const data = await putRes.json();
-    res.json(data);
+    res.status(response.status).send(text);
 
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -271,20 +214,10 @@ app.put("/entrypoint/:id", async (req, res) => {
 });
 
 // =========================
-// HEALTH CHECK
-// =========================
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "wxcc-backend"
-  });
-});
-
-// =========================
-// START SERVER
+// START
 // =========================
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`🚀 WXCC Backend running on port ${PORT}`);
+  console.log(`🚀 Server läuft auf Port ${PORT}`);
 });
