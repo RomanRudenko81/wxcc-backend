@@ -25,7 +25,6 @@ body {
 h2 { margin-bottom: 10px; }
 p { color: #c9d1d9; }
 
-/* SWITCH */
 .switch {
   position: relative;
   display: inline-block;
@@ -68,7 +67,6 @@ input:checked + .slider:before {
   transform: translateX(22px);
 }
 
-/* ROWS */
 .row {
   display: flex;
   align-items: center;
@@ -76,15 +74,14 @@ input:checked + .slider:before {
   margin-top: 15px;
 }
 
-/* INPUT ROW WRAPPER */
 .input-group {
   display: flex;
   gap: 8px;
   flex: 1;
 }
 
-/* INPUT */
-input {
+input[type="text"],
+#prompt {
   flex: 1;
   padding: 12px;
   border-radius: 10px;
@@ -94,7 +91,6 @@ input {
   outline: none;
 }
 
-/* SMALL BUTTON */
 .small-btn {
   padding: 10px 14px;
   border: none;
@@ -110,7 +106,6 @@ input {
   background: #0a5ea8;
 }
 
-/* OUTPUT */
 pre {
   margin-top: 20px;
   background: #0a0f1a;
@@ -134,9 +129,7 @@ pre {
   <h2>Supervisor Access Control</h2>
   <p>Conscia Support Demo</p>
 
-  <!-- TOGGLE ROW (AUTO UPDATE) -->
   <div class="row">
-
     <label class="switch">
       <input type="checkbox" id="emergencyToggle" onchange="toggleEmergency()">
       <span class="slider"></span>
@@ -145,17 +138,13 @@ pre {
     <span>
       Emergency Case: <span id="stateLabel">OFF</span>
     </span>
-
   </div>
 
-  <!-- INPUT + SMALL BUTTON -->
   <div class="row">
-
     <div class="input-group">
-      <input id="prompt" placeholder="Enter emergency prompt...">
+      <input id="prompt" type="text" placeholder="Enter emergency prompt...">
       <button class="small-btn" onclick="updatePrompt()">Save</button>
     </div>
-
   </div>
 
   <pre id="output">Loading...</pre>
@@ -165,35 +154,67 @@ pre {
 <script>
 const API_URL = "https://wxcc-backend.onrender.com";
 const ENTRY_POINT_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
+const POLL_INTERVAL_MS = 5000;
+
+let isUpdating = false;
+let pollHandle = null;
 
 /* INIT */
 window.onload = async function () {
-  await loadEntryPoint();
+  await loadEntryPoint(true);
+  startPolling();
 };
 
+/* CLEANUP */
+window.onbeforeunload = function () {
+  if (pollHandle) {
+    clearInterval(pollHandle);
+  }
+};
+
+/* POLLING */
+function startPolling() {
+  if (pollHandle) {
+    clearInterval(pollHandle);
+  }
+
+  pollHandle = setInterval(async () => {
+    if (isUpdating) return;
+    await loadEntryPoint(false);
+  }, POLL_INTERVAL_MS);
+}
+
 /* GET */
-async function loadEntryPoint() {
+async function loadEntryPoint(updateOutput = true) {
   try {
     const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`);
     const data = await res.json();
 
-    const overrides = data.flowOverrideSettings || [];
+    const toggle = document.getElementById("emergencyToggle");
+    const promptInput = document.getElementById("prompt");
 
-    const emergencyCase = overrides.find(o => o.name === "EmergencyCase");
-    const emergencyPrompt = overrides.find(o => o.name === "EmergencyPrompt");
+    const emergencyCase =
+      typeof data.emergencyCase === "boolean"
+        ? data.emergencyCase
+        : false;
 
-    if (emergencyCase) {
-      document.getElementById("emergencyToggle").checked =
-        emergencyCase.value === "true";
-      updateLabel();
+    const emergencyPrompt =
+      typeof data.emergencyPrompt === "string"
+        ? data.emergencyPrompt
+        : "";
+
+    toggle.checked = emergencyCase;
+    updateLabel();
+
+    const isTypingInPrompt = document.activeElement === promptInput;
+    if (!isTypingInPrompt) {
+      promptInput.value = emergencyPrompt;
     }
 
-    if (emergencyPrompt) {
-      document.getElementById("prompt").value = emergencyPrompt.value;
+    if (updateOutput) {
+      document.getElementById("output").textContent =
+        JSON.stringify(data, null, 2);
     }
-
-    document.getElementById("output").textContent =
-      JSON.stringify(data, null, 2);
 
   } catch (err) {
     document.getElementById("output").textContent =
@@ -207,41 +228,17 @@ function updateLabel() {
   document.getElementById("stateLabel").innerText = state ? "ON" : "OFF";
 }
 
-/* 🔥 AUTO UPDATE TOGGLE */
+/* AUTO UPDATE TOGGLE */
 async function toggleEmergency() {
   updateLabel();
 
   const EmergencyCase = document.getElementById("emergencyToggle").checked;
-
-  try {
-    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        EmergencyCase,
-        EmergencyPrompt: document.getElementById("prompt").value
-      })
-    });
-
-    const data = await res.json();
-
-    document.getElementById("output").textContent =
-      JSON.stringify(data, null, 2);
-
-  } catch (err) {
-    document.getElementById("output").textContent =
-      "Toggle update error: " + err.message;
-  }
-}
-
-/* ✍️ PROMPT ONLY UPDATE */
-async function updatePrompt() {
-  const EmergencyCase = document.getElementById("emergencyToggle").checked;
   const EmergencyPrompt = document.getElementById("prompt").value;
 
   try {
+    isUpdating = true;
+    document.getElementById("output").textContent = "Updating toggle...";
+
     const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
       method: "PUT",
       headers: {
@@ -258,9 +255,48 @@ async function updatePrompt() {
     document.getElementById("output").textContent =
       JSON.stringify(data, null, 2);
 
+    await loadEntryPoint(false);
+
+  } catch (err) {
+    document.getElementById("output").textContent =
+      "Toggle update error: " + err.message;
+  } finally {
+    isUpdating = false;
+  }
+}
+
+/* PROMPT UPDATE */
+async function updatePrompt() {
+  const EmergencyCase = document.getElementById("emergencyToggle").checked;
+  const EmergencyPrompt = document.getElementById("prompt").value;
+
+  try {
+    isUpdating = true;
+    document.getElementById("output").textContent = "Saving prompt...";
+
+    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        EmergencyCase,
+        EmergencyPrompt
+      })
+    });
+
+    const data = await res.json();
+
+    document.getElementById("output").textContent =
+      JSON.stringify(data, null, 2);
+
+    await loadEntryPoint(false);
+
   } catch (err) {
     document.getElementById("output").textContent =
       "Prompt update error: " + err.message;
+  } finally {
+    isUpdating = false;
   }
 }
 </script>
