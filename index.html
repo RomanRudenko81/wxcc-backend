@@ -22,41 +22,10 @@ body {
   backdrop-filter: blur(10px);
 }
 
-h2 {
-  margin-bottom: 10px;
-}
+h2 { margin-bottom: 10px; }
+p { color: #c9d1d9; }
 
-p {
-  color: #c9d1d9;
-}
-
-input {
-  width: 100%;
-  padding: 12px;
-  margin-top: 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.15);
-  background: rgba(0,0,0,0.35);
-  color: white;
-  outline: none;
-}
-
-button {
-  width: 100%;
-  padding: 12px;
-  margin-top: 15px;
-  border: none;
-  border-radius: 10px;
-  background: #0078d4;
-  color: white;
-  font-size: 15px;
-  cursor: pointer;
-}
-
-button:hover {
-  background: #0a5ea8;
-}
-
+/* SWITCH */
 .switch {
   position: relative;
   display: inline-block;
@@ -73,7 +42,7 @@ button:hover {
 .slider {
   position: absolute;
   cursor: pointer;
-  top: 0; left: 0; right: 0; bottom: 0;
+  inset: 0;
   background-color: #3a3f4b;
   transition: .3s;
   border-radius: 26px;
@@ -99,13 +68,49 @@ input:checked + .slider:before {
   transform: translateX(22px);
 }
 
+/* ROWS */
 .row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   margin-top: 15px;
 }
 
+/* INPUT ROW WRAPPER */
+.input-group {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+}
+
+/* INPUT */
+input {
+  flex: 1;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.35);
+  color: white;
+  outline: none;
+}
+
+/* SMALL BUTTON */
+.small-btn {
+  padding: 10px 14px;
+  border: none;
+  border-radius: 10px;
+  background: #0078d4;
+  color: white;
+  font-size: 13px;
+  cursor: pointer;
+  width: auto;
+}
+
+.small-btn:hover {
+  background: #0a5ea8;
+}
+
+/* OUTPUT */
 pre {
   margin-top: 20px;
   background: #0a0f1a;
@@ -129,18 +134,29 @@ pre {
   <h2>Supervisor Access Control</h2>
   <p>Conscia Support Demo</p>
 
+  <!-- TOGGLE ROW (AUTO UPDATE) -->
   <div class="row">
+
     <label class="switch">
-      <input type="checkbox" id="emergencyToggle" onchange="updateLabel()">
+      <input type="checkbox" id="emergencyToggle" onchange="toggleEmergency()">
       <span class="slider"></span>
     </label>
 
-    <span>Emergency Case: <span id="stateLabel">OFF</span></span>
+    <span>
+      Emergency Case: <span id="stateLabel">OFF</span>
+    </span>
+
   </div>
 
-  <input id="prompt" placeholder="Please enter new prompt text">
+  <!-- INPUT + SMALL BUTTON -->
+  <div class="row">
 
-  <button onclick="sendUpdate()">Update Channel</button>
+    <div class="input-group">
+      <input id="prompt" placeholder="Enter emergency prompt...">
+      <button class="small-btn" onclick="updatePrompt()">Save</button>
+    </div>
+
+  </div>
 
   <pre id="output">Loading...</pre>
 
@@ -150,25 +166,16 @@ pre {
 const API_URL = "https://wxcc-backend.onrender.com";
 const ENTRY_POINT_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 
-/* -------------------------
-   INIT: LOAD ENTRY POINT
---------------------------*/
+/* INIT */
 window.onload = async function () {
   await loadEntryPoint();
 };
 
-/* -------------------------
-   GET ENTRY POINT
---------------------------*/
+/* GET */
 async function loadEntryPoint() {
   try {
-    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
-      method: "GET"
-    });
-
+    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`);
     const data = await res.json();
-
-    console.log("Loaded Entry Point:", data);
 
     const overrides = data.flowOverrideSettings || [];
 
@@ -176,8 +183,8 @@ async function loadEntryPoint() {
     const emergencyPrompt = overrides.find(o => o.name === "EmergencyPrompt");
 
     if (emergencyCase) {
-      const value = emergencyCase.value === "true";
-      document.getElementById("emergencyToggle").checked = value;
+      document.getElementById("emergencyToggle").checked =
+        emergencyCase.value === "true";
       updateLabel();
     }
 
@@ -189,57 +196,71 @@ async function loadEntryPoint() {
       JSON.stringify(data, null, 2);
 
   } catch (err) {
-    console.error("LOAD ERROR:", err);
     document.getElementById("output").textContent =
       "Load error: " + err.message;
   }
 }
 
-/* -------------------------
-   TOGGLE LABEL UPDATE
---------------------------*/
+/* LABEL */
 function updateLabel() {
   const state = document.getElementById("emergencyToggle").checked;
   document.getElementById("stateLabel").innerText = state ? "ON" : "OFF";
 }
 
-/* -------------------------
-   PUT UPDATE ENTRY POINT
---------------------------*/
-async function sendUpdate() {
-  const EmergencyCase = document.getElementById("emergencyToggle").checked;
-  const EmergencyPrompt = document.getElementById("prompt").value;
+/* 🔥 AUTO UPDATE TOGGLE */
+async function toggleEmergency() {
+  updateLabel();
 
-  const payload = {
-    EmergencyCase,
-    EmergencyPrompt
-  };
+  const EmergencyCase = document.getElementById("emergencyToggle").checked;
 
   try {
-    document.getElementById("output").textContent = "Updating...";
-
     const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        EmergencyCase,
+        EmergencyPrompt: document.getElementById("prompt").value
+      })
     });
 
     const data = await res.json();
 
-    console.log("Update response:", data);
+    document.getElementById("output").textContent =
+      JSON.stringify(data, null, 2);
+
+  } catch (err) {
+    document.getElementById("output").textContent =
+      "Toggle update error: " + err.message;
+  }
+}
+
+/* ✍️ PROMPT ONLY UPDATE */
+async function updatePrompt() {
+  const EmergencyCase = document.getElementById("emergencyToggle").checked;
+  const EmergencyPrompt = document.getElementById("prompt").value;
+
+  try {
+    const res = await fetch(`${API_URL}/entrypoint/${ENTRY_POINT_ID}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        EmergencyCase,
+        EmergencyPrompt
+      })
+    });
+
+    const data = await res.json();
 
     document.getElementById("output").textContent =
       JSON.stringify(data, null, 2);
 
-    // reload fresh state after update
-    await loadEntryPoint();
-
   } catch (err) {
-    console.error("UPDATE ERROR:", err);
     document.getElementById("output").textContent =
-      "Update error: " + err.message;
+      "Prompt update error: " + err.message;
   }
 }
 </script>
