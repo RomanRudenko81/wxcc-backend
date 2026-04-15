@@ -41,6 +41,9 @@ function loadToken() {
   }
 }
 
+// =========================
+// 💾 SAVE TOKEN
+// =========================
 function saveToken() {
   try {
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokenStore, null, 2));
@@ -52,34 +55,27 @@ function saveToken() {
 loadToken();
 
 // =========================
-// 🧠 SAFE FETCH JSON HELPER (WICHTIG)
+// 🧠 SAFE JSON HELPER
 // =========================
 async function safeJson(response) {
   const text = await response.text();
 
-  // Debug optional
   console.log("RESPONSE STATUS:", response.status);
   console.log("RESPONSE BODY:", text);
 
-  // ❌ HTML ERROR DETECTION
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}: ${text}`);
   }
 
-  // ❌ HTML DETECTION (dein Bug fix)
   if (text.trim().startsWith("<")) {
     throw new Error("HTML statt JSON erhalten: " + text);
   }
 
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    throw new Error("Invalid JSON: " + text);
-  }
+  return JSON.parse(text);
 }
 
 // =========================
-// LOGIN (unverändert)
+// LOGIN
 // =========================
 app.get("/login", (req, res) => {
   const scope = encodeURIComponent("cjp:config_read cjp:config_write");
@@ -127,7 +123,7 @@ app.get("/callback", async (req, res) => {
 });
 
 // =========================
-// REFRESH
+// REFRESH TOKEN
 // =========================
 async function refreshAccessToken() {
   const response = await fetch("https://webexapis.com/v1/access_token", {
@@ -156,7 +152,7 @@ async function refreshAccessToken() {
 }
 
 // =========================
-// TOKEN VALIDATION
+// GET VALID TOKEN
 // =========================
 async function getValidToken() {
   if (!tokenStore.access_token) {
@@ -173,7 +169,7 @@ async function getValidToken() {
 }
 
 // =========================
-// ENTRYPOINT GET (SAFE)
+// ENTRYPOINT GET (NORMALIZED)
 // =========================
 app.get("/entrypoint/:id", async (req, res) => {
   try {
@@ -183,13 +179,33 @@ app.get("/entrypoint/:id", async (req, res) => {
 
     const response = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${token}`
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
       }
     });
 
     const text = await response.text();
 
-    res.status(response.status).send(text);
+    if (text.trim().startsWith("<")) {
+      return res.status(500).json({
+        error: "API returned HTML instead of JSON",
+        raw: text
+      });
+    }
+
+    const data = JSON.parse(text);
+
+    const overrides = data.flowOverrideSettings || [];
+
+    const emergencyCase = overrides.find(o => o.name === "EmergencyCase");
+    const emergencyPrompt = overrides.find(o => o.name === "EmergencyPrompt");
+
+    res.json({
+      ...data,
+      flowOverrideSettings: overrides,
+      emergencyCase: emergencyCase?.value === "true",
+      emergencyPrompt: emergencyPrompt?.value || ""
+    });
 
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -197,7 +213,7 @@ app.get("/entrypoint/:id", async (req, res) => {
 });
 
 // =========================
-// PUT ENTRYPOINT (CRASH SAFE)
+// PUT ENTRYPOINT
 // =========================
 app.put("/entrypoint/:id", async (req, res) => {
   try {
@@ -205,7 +221,6 @@ app.put("/entrypoint/:id", async (req, res) => {
 
     const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
 
-    // GET SAFE
     const getRes = await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`
@@ -214,7 +229,6 @@ app.put("/entrypoint/:id", async (req, res) => {
 
     const entryPoint = await safeJson(getRes);
 
-    // modify only needed field
     entryPoint.flowOverrideSettings = [
       {
         name: "EmergencyCase",
@@ -224,11 +238,10 @@ app.put("/entrypoint/:id", async (req, res) => {
       {
         name: "EmergencyPrompt",
         type: "STRING",
-        value: req.body.EmergencyPrompt?.trim() || ""
+        value: String(req.body.EmergencyPrompt || "").trim()
       }
     ];
 
-    // PUT SAFE
     const putRes = await fetch(url, {
       method: "PUT",
       headers: {
