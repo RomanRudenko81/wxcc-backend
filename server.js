@@ -20,9 +20,6 @@ const REDIRECT_URI = process.env.REDIRECT_URI;
 // 📁 Token File
 const TOKEN_FILE = "token.json";
 
-// =========================
-// 🧠 TOKEN STORE
-// =========================
 let tokenStore = {
   access_token: null,
   refresh_token: null,
@@ -35,32 +32,54 @@ let tokenStore = {
 function loadToken() {
   try {
     if (fs.existsSync(TOKEN_FILE)) {
-      const data = fs.readFileSync(TOKEN_FILE);
+      const data = fs.readFileSync(TOKEN_FILE, "utf-8");
       tokenStore = JSON.parse(data);
-      console.log("🔁 Token aus Datei geladen");
+      console.log("🔁 Token geladen");
     }
   } catch (err) {
-    console.error("❌ Fehler beim Laden des Tokens:", err);
+    console.error("❌ Token load error:", err);
   }
 }
 
-// =========================
-// 💾 SAVE TOKEN
-// =========================
 function saveToken() {
   try {
     fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokenStore, null, 2));
-    console.log("💾 Token gespeichert");
   } catch (err) {
-    console.error("❌ Fehler beim Speichern:", err);
+    console.error("❌ Token save error:", err);
   }
 }
 
-// Beim Start laden
 loadToken();
 
 // =========================
-// 🔐 LOGIN
+// 🧠 SAFE FETCH JSON HELPER (WICHTIG)
+// =========================
+async function safeJson(response) {
+  const text = await response.text();
+
+  // Debug optional
+  console.log("RESPONSE STATUS:", response.status);
+  console.log("RESPONSE BODY:", text);
+
+  // ❌ HTML ERROR DETECTION
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${text}`);
+  }
+
+  // ❌ HTML DETECTION (dein Bug fix)
+  if (text.trim().startsWith("<")) {
+    throw new Error("HTML statt JSON erhalten: " + text);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error("Invalid JSON: " + text);
+  }
+}
+
+// =========================
+// LOGIN (unverändert)
 // =========================
 app.get("/login", (req, res) => {
   const scope = encodeURIComponent("cjp:config_read cjp:config_write");
@@ -71,14 +90,10 @@ app.get("/login", (req, res) => {
 });
 
 // =========================
-// 🔁 CALLBACK
+// CALLBACK
 // =========================
 app.get("/callback", async (req, res) => {
   const code = req.query.code;
-
-  if (!code) {
-    return res.send("❌ Kein Code erhalten");
-  }
 
   try {
     const response = await fetch("https://webexapis.com/v1/access_token", {
@@ -95,13 +110,7 @@ app.get("/callback", async (req, res) => {
       })
     });
 
-    const data = await response.json();
-
-    console.log("🔍 TOKEN RESPONSE:", data);
-
-    if (!data.access_token) {
-      return res.send("❌ Token Fehler: " + JSON.stringify(data));
-    }
+    const data = await safeJson(response);
 
     tokenStore = {
       access_token: data.access_token,
@@ -110,21 +119,17 @@ app.get("/callback", async (req, res) => {
     };
 
     saveToken();
-
-    res.send("✅ Login erfolgreich & gespeichert!");
+    res.send("✅ Login OK");
 
   } catch (err) {
-    console.error(err);
-    res.send("❌ Fehler beim Token holen");
+    res.status(500).send(err.message);
   }
 });
 
 // =========================
-// 🔄 REFRESH TOKEN
+// REFRESH
 // =========================
 async function refreshAccessToken() {
-  console.log("🔄 Refreshing token...");
-
   const response = await fetch("https://webexapis.com/v1/access_token", {
     method: "POST",
     headers: {
@@ -138,13 +143,7 @@ async function refreshAccessToken() {
     })
   });
 
-  const data = await response.json();
-
-  console.log("🔍 REFRESH RESPONSE:", data);
-
-  if (!data.access_token) {
-    throw new Error("Refresh failed: " + JSON.stringify(data));
-  }
+  const data = await safeJson(response);
 
   tokenStore = {
     access_token: data.access_token,
@@ -153,16 +152,15 @@ async function refreshAccessToken() {
   };
 
   saveToken();
-
   return tokenStore.access_token;
 }
 
 // =========================
-// 🧠 VALID TOKEN
+// TOKEN VALIDATION
 // =========================
 async function getValidToken() {
   if (!tokenStore.access_token) {
-    throw new Error("Nicht eingeloggt → /login");
+    throw new Error("Not logged in");
   }
 
   const now = Date.now();
@@ -175,19 +173,7 @@ async function getValidToken() {
 }
 
 // =========================
-// DEBUG
-// =========================
-app.get("/debug/token", (req, res) => {
-  res.json({
-    status: tokenStore.access_token ? "✅ vorhanden" : "❌ fehlt",
-    expires_in: tokenStore.expires_at
-      ? Math.floor((tokenStore.expires_at - Date.now()) / 1000)
-      : null
-  });
-});
-
-// =========================
-// ENTRYPOINT GET
+// ENTRYPOINT GET (SAFE)
 // =========================
 app.get("/entrypoint/:id", async (req, res) => {
   try {
@@ -203,10 +189,58 @@ app.get("/entrypoint/:id", async (req, res) => {
 
     const text = await response.text();
 
-    console.log("STATUS:", response.status);
-    console.log("BODY:", text);
-
     res.status(response.status).send(text);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================
+// PUT ENTRYPOINT (CRASH SAFE)
+// =========================
+app.put("/entrypoint/:id", async (req, res) => {
+  try {
+    const token = await getValidToken();
+
+    const url = `${BASE_URL}/organization/${ORG_ID}/entry-point/${req.params.id}`;
+
+    // GET SAFE
+    const getRes = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    const entryPoint = await safeJson(getRes);
+
+    // modify only needed field
+    entryPoint.flowOverrideSettings = [
+      {
+        name: "EmergencyCase",
+        type: "BOOLEAN",
+        value: req.body.EmergencyCase ? "true" : "false"
+      },
+      {
+        name: "EmergencyPrompt",
+        type: "STRING",
+        value: req.body.EmergencyPrompt?.trim() || ""
+      }
+    ];
+
+    // PUT SAFE
+    const putRes = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(entryPoint)
+    });
+
+    const result = await safeJson(putRes);
+
+    res.json(result);
 
   } catch (err) {
     res.status(500).json({ error: err.message });
