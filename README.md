@@ -1,2 +1,0 @@
-# wxcc-backend
-wxcc-backend
