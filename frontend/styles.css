@@ -15,8 +15,13 @@ body {
   backdrop-filter: blur(10px);
 }
 
-h2 { margin-bottom: 10px; }
-p { color: #c9d1d9; }
+h2 {
+  margin-bottom: 10px;
+}
+
+p {
+  color: #c9d1d9;
+}
 
 .info-row {
   display: flex;
