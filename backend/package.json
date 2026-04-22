@@ -1,16 +1,15 @@
 {
-  "name": "wxcc-supervisor-widget",
+  "name": "wxcc-backend-secure-widget",
   "version": "1.0.0",
-  "private": true,
+  "type": "module",
+  "main": "server.js",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "start": "node server.js"
   },
   "dependencies": {
-    "@wxcc-desktop/sdk": "latest"
-  },
-  "devDependencies": {
-    "vite": "^5.4.10"
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2"
   }
 }
