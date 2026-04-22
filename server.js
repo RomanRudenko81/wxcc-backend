@@ -26,6 +26,8 @@ const SUPERVISOR_USER_IDS = new Set(JSON.parse(process.env.SUPERVISOR_USER_IDS |
 
 const PORT = process.env.PORT || 3000;
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 8 * 60 * 60 * 1000);
+const SESSION_PRUNE_INTERVAL_MS = Number(process.env.SESSION_PRUNE_INTERVAL_MS || 15 * 60 * 1000);
 
 const sessions = new Map();
 
@@ -34,25 +36,58 @@ let tokenStore = {
   expiresAt: 0
 };
 
+function pruneExpiredSessions() {
+  const now = Date.now();
+
+  for (const [sid, session] of sessions.entries()) {
+    if (!session || session.expiresAt < now) {
+      sessions.delete(sid);
+    }
+  }
+}
+
+setInterval(pruneExpiredSessions, SESSION_PRUNE_INTERVAL_MS).unref();
+
 function signSession(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
   return `${body}.${sig}`;
 }
 
+function safeCompare(a, b) {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+
+  if (aBuf.length !== bBuf.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
 function verifySession(token) {
   if (!token || !token.includes(".")) return null;
 
   const [body, sig] = token.split(".");
+  if (!body || !sig) return null;
+
   const expected = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
 
-  if (sig !== expected) return null;
+  if (!safeCompare(sig, expected)) {
+    return null;
+  }
 
-  const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+
   if (!payload.sid || !sessions.has(payload.sid)) return null;
 
   const stored = sessions.get(payload.sid);
-  if (stored.expiresAt < Date.now()) {
+  if (!stored || stored.expiresAt < Date.now()) {
     sessions.delete(payload.sid);
     return null;
   }
@@ -124,7 +159,11 @@ function requireSession(req, res, next) {
   const session = verifySession(token);
 
   if (!session) {
-    return res.status(401).json({ error: "Invalid or expired session" });
+    return res.status(401).json({
+      error: "Invalid or expired session",
+      code: "SESSION_INVALID",
+      action: "Re-bootstrap the frontend session"
+    });
   }
 
   req.session = session;
@@ -140,10 +179,17 @@ function requireWriteRole(req, res, next) {
 }
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, entryPointId: ENTRY_POINT_ID });
+  res.json({
+    ok: true,
+    entryPointId: ENTRY_POINT_ID,
+    activeSessions: sessions.size,
+    sessionTtlMs: SESSION_TTL_MS
+  });
 });
 
 app.post("/api/session/bootstrap", (req, res) => {
+  pruneExpiredSessions();
+
   const user = {
     email: req.body?.email || "",
     userId: req.body?.userId || "",
@@ -162,14 +208,14 @@ app.post("/api/session/bootstrap", (req, res) => {
     sid,
     user,
     role,
-    expiresAt: Date.now() + (8 * 60 * 60 * 1000)
+    expiresAt: Date.now() + SESSION_TTL_MS
   };
 
   sessions.set(sid, session);
 
   const sessionToken = signSession({ sid });
 
-  res.json({ sessionToken, role, user });
+  res.json({ sessionToken, role, user, expiresAt: session.expiresAt });
 });
 
 app.get("/api/entrypoint/:id", requireSession, async (req, res) => {
@@ -190,7 +236,7 @@ app.get("/api/entrypoint/:id", requireSession, async (req, res) => {
 
     const data = await safeJson(response);
 
-    const overrides = data.flowOverrideSettings || [];
+    const overrides = Array.isArray(data.flowOverrideSettings) ? data.flowOverrideSettings : [];
     const emergencyCase = overrides.find(o => o.name === "EmergencyCase");
     const emergencyPrompt = overrides.find(o => o.name === "EmergencyPrompt");
 
@@ -223,8 +269,14 @@ app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res
     });
 
     const entryPoint = await safeJson(getRes);
+    const existingOverrides = Array.isArray(entryPoint.flowOverrideSettings) ? entryPoint.flowOverrideSettings : [];
+
+    const filteredOverrides = existingOverrides.filter(
+      item => item?.name !== "EmergencyCase" && item?.name !== "EmergencyPrompt"
+    );
 
     entryPoint.flowOverrideSettings = [
+      ...filteredOverrides,
       {
         name: "EmergencyCase",
         type: "BOOLEAN",
