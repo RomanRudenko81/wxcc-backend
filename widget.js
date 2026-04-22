@@ -7,6 +7,7 @@ let currentRole = "viewer";
 let isUpdating = false;
 let isBootstrapping = false;
 let pollHandle = null;
+let resolvedIdentity = null;
 
 /**
  * Replace this with the exact Webex Desktop SDK identity lookup available
@@ -16,12 +17,32 @@ let pollHandle = null;
 async function resolveDesktopIdentity() {
   const params = new URLSearchParams(window.location.search);
 
-  return {
+  const identity = {
     email: params.get("email") || "",
     userId: params.get("userId") || "",
     teamId: params.get("teamId") || "",
     displayName: params.get("displayName") || ""
   };
+
+  resolvedIdentity = identity;
+  return identity;
+}
+
+function renderDebugInfo(extra = {}) {
+  const output = document.getElementById("output");
+  const debugPayload = {
+    localIdentity: resolvedIdentity || {
+      email: "",
+      userId: "",
+      teamId: "",
+      displayName: ""
+    },
+    currentRole,
+    hasSessionToken: Boolean(sessionToken),
+    ...extra
+  };
+
+  output.textContent = JSON.stringify(debugPayload, null, 2);
 }
 
 async function bootstrapSession() {
@@ -45,10 +66,18 @@ async function bootstrapSession() {
     const data = await readJsonResponse(res);
 
     if (!res.ok) {
+      renderDebugInfo({
+        bootstrapError: data,
+        bootstrapHttpStatus: res.status
+      });
       throw new Error(data.error || "Session bootstrap failed");
     }
 
     if (!data.sessionToken) {
+      renderDebugInfo({
+        bootstrapError: data,
+        bootstrapHttpStatus: res.status
+      });
       throw new Error("Bootstrap response did not include a session token");
     }
 
@@ -60,6 +89,10 @@ async function bootstrapSession() {
     document.getElementById("roleBadge").textContent = currentRole.toUpperCase();
 
     applyRoleState();
+
+    renderDebugInfo({
+      bootstrapResponse: data
+    });
   } finally {
     isBootstrapping = false;
   }
@@ -79,7 +112,9 @@ window.onload = async function () {
     await loadEntryPoint(true);
     startPolling();
   } catch (err) {
-    document.getElementById("output").textContent = "Init error: " + err.message;
+    renderDebugInfo({
+      initError: err.message
+    });
   }
 };
 
@@ -143,6 +178,10 @@ async function loadEntryPoint(updateOutput = true) {
     const data = await readJsonResponse(res);
 
     if (!res.ok) {
+      renderDebugInfo({
+        loadHttpStatus: res.status,
+        loadError: data
+      });
       throw new Error(data.error || "Load failed");
     }
 
@@ -161,10 +200,14 @@ async function loadEntryPoint(updateOutput = true) {
     }
 
     if (updateOutput) {
-      document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+      renderDebugInfo({
+        entryPointResponse: data
+      });
     }
   } catch (err) {
-    document.getElementById("output").textContent = "Load error: " + err.message;
+    renderDebugInfo({
+      loadException: err.message
+    });
   }
 }
 
@@ -188,7 +231,14 @@ async function saveState(statusText) {
 
   try {
     isUpdating = true;
-    document.getElementById("output").textContent = statusText;
+
+    renderDebugInfo({
+      status: statusText,
+      pendingPayload: {
+        EmergencyCase,
+        EmergencyPrompt
+      }
+    });
 
     const res = await authorizedFetch(`/api/entrypoint/${ENTRY_POINT_ID}`, {
       method: "PUT",
@@ -201,13 +251,30 @@ async function saveState(statusText) {
     const data = await readJsonResponse(res);
 
     if (!res.ok) {
+      renderDebugInfo({
+        updateHttpStatus: res.status,
+        updateError: data,
+        attemptedPayload: {
+          EmergencyCase,
+          EmergencyPrompt
+        }
+      });
       throw new Error(data.error || "Update failed");
     }
 
-    document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+    renderDebugInfo({
+      updateResponse: data
+    });
+
     await loadEntryPoint(false);
   } catch (err) {
-    document.getElementById("output").textContent = "Update error: " + err.message;
+    renderDebugInfo({
+      updateException: err.message,
+      attemptedPayload: {
+        EmergencyCase,
+        EmergencyPrompt
+      }
+    });
   } finally {
     isUpdating = false;
   }
