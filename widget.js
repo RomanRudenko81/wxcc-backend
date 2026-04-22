@@ -5,6 +5,7 @@ const POLL_INTERVAL_MS = 5000;
 let sessionToken = null;
 let currentRole = "viewer";
 let isUpdating = false;
+let isBootstrapping = false;
 let pollHandle = null;
 
 /**
@@ -24,30 +25,44 @@ async function resolveDesktopIdentity() {
 }
 
 async function bootstrapSession() {
-  const identity = await resolveDesktopIdentity();
-
-  const res = await fetch(`${API_URL}/api/session/bootstrap`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(identity)
-  });
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.error || "Session bootstrap failed");
+  if (isBootstrapping) {
+    return;
   }
 
-  sessionToken = data.sessionToken;
-  currentRole = data.role || "viewer";
+  isBootstrapping = true;
 
-  document.getElementById("userInfo").textContent =
-    `${data.user?.displayName || "Unknown"}${data.user?.email ? " (" + data.user.email + ")" : ""}`;
-  document.getElementById("roleBadge").textContent = currentRole.toUpperCase();
+  try {
+    const identity = await resolveDesktopIdentity();
 
-  applyRoleState();
+    const res = await fetch(`${API_URL}/api/session/bootstrap`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(identity)
+    });
+
+    const data = await readJsonResponse(res);
+
+    if (!res.ok) {
+      throw new Error(data.error || "Session bootstrap failed");
+    }
+
+    if (!data.sessionToken) {
+      throw new Error("Bootstrap response did not include a session token");
+    }
+
+    sessionToken = data.sessionToken;
+    currentRole = data.role || "viewer";
+
+    document.getElementById("userInfo").textContent =
+      `${data.user?.displayName || "Unknown"}${data.user?.email ? " (" + data.user.email + ")" : ""}`;
+    document.getElementById("roleBadge").textContent = currentRole.toUpperCase();
+
+    applyRoleState();
+  } finally {
+    isBootstrapping = false;
+  }
 }
 
 function applyRoleState() {
@@ -80,24 +95,52 @@ function startPolling() {
   }
 
   pollHandle = setInterval(async () => {
-    if (isUpdating) return;
+    if (isUpdating || isBootstrapping) return;
     await loadEntryPoint(false);
   }, POLL_INTERVAL_MS);
 }
 
-async function apiFetch(path, options = {}) {
-  const headers = {
-    ...(options.headers || {}),
-    Authorization: `Bearer ${sessionToken}`
-  };
+async function readJsonResponse(res) {
+  const text = await res.text();
 
-  return fetch(`${API_URL}${path}`, { ...options, headers });
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text };
+  }
+}
+
+async function authorizedFetch(path, options = {}, retryOn401 = true) {
+  if (!sessionToken) {
+    await bootstrapSession();
+  }
+
+  const makeRequest = async () => fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      Authorization: `Bearer ${sessionToken}`
+    }
+  });
+
+  let res = await makeRequest();
+
+  if (res.status === 401 && retryOn401) {
+    await bootstrapSession();
+    res = await makeRequest();
+  }
+
+  return res;
 }
 
 async function loadEntryPoint(updateOutput = true) {
   try {
-    const res = await apiFetch(`/api/entrypoint/${ENTRY_POINT_ID}`);
-    const data = await res.json();
+    const res = await authorizedFetch(`/api/entrypoint/${ENTRY_POINT_ID}`);
+    const data = await readJsonResponse(res);
 
     if (!res.ok) {
       throw new Error(data.error || "Load failed");
@@ -147,7 +190,7 @@ async function saveState(statusText) {
     isUpdating = true;
     document.getElementById("output").textContent = statusText;
 
-    const res = await apiFetch(`/api/entrypoint/${ENTRY_POINT_ID}`, {
+    const res = await authorizedFetch(`/api/entrypoint/${ENTRY_POINT_ID}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json"
@@ -155,7 +198,7 @@ async function saveState(statusText) {
       body: JSON.stringify({ EmergencyCase, EmergencyPrompt })
     });
 
-    const data = await res.json();
+    const data = await readJsonResponse(res);
 
     if (!res.ok) {
       throw new Error(data.error || "Update failed");
