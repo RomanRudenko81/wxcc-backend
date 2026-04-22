@@ -21,7 +21,9 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 
 const ALLOWED_TEAM_IDS = JSON.parse(process.env.ALLOWED_TEAM_IDS || "[]");
-const SUPERVISOR_EMAILS = new Set(JSON.parse(process.env.SUPERVISOR_EMAILS || "[]").map(v => String(v).toLowerCase()));
+const SUPERVISOR_EMAILS = new Set(
+  JSON.parse(process.env.SUPERVISOR_EMAILS || "[]").map(v => String(v).toLowerCase())
+);
 const SUPERVISOR_USER_IDS = new Set(JSON.parse(process.env.SUPERVISOR_USER_IDS || "[]"));
 
 const PORT = process.env.PORT || 3000;
@@ -100,8 +102,16 @@ function getRole(user) {
   const userId = String(user.userId || "");
   const teamId = String(user.teamId || "");
 
-  if (!ALLOWED_TEAM_IDS.includes(teamId)) return "denied";
-  if (SUPERVISOR_EMAILS.has(email) || SUPERVISOR_USER_IDS.has(userId)) return "supervisor";
+  const teamRestrictionEnabled = Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0;
+
+  if (teamRestrictionEnabled && !ALLOWED_TEAM_IDS.includes(teamId)) {
+    return "denied";
+  }
+
+  if (SUPERVISOR_EMAILS.has(email) || SUPERVISOR_USER_IDS.has(userId)) {
+    return "supervisor";
+  }
+
   return "viewer";
 }
 
@@ -183,7 +193,9 @@ app.get("/health", (req, res) => {
     ok: true,
     entryPointId: ENTRY_POINT_ID,
     activeSessions: sessions.size,
-    sessionTtlMs: SESSION_TTL_MS
+    sessionTtlMs: SESSION_TTL_MS,
+    teamRestrictionEnabled: Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0,
+    allowedTeamIds: ALLOWED_TEAM_IDS
   });
 });
 
@@ -198,9 +210,19 @@ app.post("/api/session/bootstrap", (req, res) => {
   };
 
   const role = getRole(user);
+  const teamRestrictionEnabled = Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0;
 
   if (role === "denied") {
-    return res.status(403).json({ error: "User is not in an allowed team" });
+    return res.status(403).json({
+      error: "User is not in an allowed team",
+      debug: {
+        receivedEmail: user.email,
+        receivedUserId: user.userId,
+        receivedTeamId: user.teamId,
+        allowedTeamIds: ALLOWED_TEAM_IDS,
+        teamRestrictionEnabled
+      }
+    });
   }
 
   const sid = crypto.randomUUID();
@@ -215,7 +237,19 @@ app.post("/api/session/bootstrap", (req, res) => {
 
   const sessionToken = signSession({ sid });
 
-  res.json({ sessionToken, role, user, expiresAt: session.expiresAt });
+  res.json({
+    sessionToken,
+    role,
+    user,
+    expiresAt: session.expiresAt,
+    debug: {
+      receivedEmail: user.email,
+      receivedUserId: user.userId,
+      receivedTeamId: user.teamId,
+      allowedTeamIds: ALLOWED_TEAM_IDS,
+      teamRestrictionEnabled
+    }
+  });
 });
 
 app.get("/api/entrypoint/:id", requireSession, async (req, res) => {
