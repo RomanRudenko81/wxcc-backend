@@ -1,281 +1,345 @@
-const API_URL = "https://wxcc-backend.onrender.com";
-const ENTRY_POINT_ID = "284cd09a-eef4-40a2-82c6-53d08705e3e3";
-const POLL_INTERVAL_MS = 5000;
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import crypto from "crypto";
+import dotenv from "dotenv";
 
-let sessionToken = null;
-let currentRole = "viewer";
-let isUpdating = false;
-let isBootstrapping = false;
-let pollHandle = null;
-let resolvedIdentity = null;
+dotenv.config();
 
-/**
- * Replace this with the exact Webex Desktop SDK identity lookup available
- * in your tenant. This fallback reads query parameters:
- *   ?userId=...&email=...&teamId=...&displayName=...
- */
-async function resolveDesktopIdentity() {
-  const params = new URLSearchParams(window.location.search);
+const app = express();
+app.use(express.json());
 
-  const identity = {
-    email: params.get("email") || "",
-    userId: params.get("userId") || "",
-    teamId: params.get("teamId") || "",
-    displayName: params.get("displayName") || ""
-  };
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://romanrudenko81.github.io";
+app.use(cors({ origin: FRONTEND_ORIGIN }));
 
-  resolvedIdentity = identity;
-  return identity;
-}
+const WEBEX_BASE_URL = process.env.WEBEX_BASE_URL || "https://api.wxcc-eu2.cisco.com";
+const WEBEX_ORG_ID = process.env.WEBEX_ORG_ID || "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
+const WEBEX_CLIENT_ID = process.env.WEBEX_CLIENT_ID;
+const WEBEX_CLIENT_SECRET = process.env.WEBEX_CLIENT_SECRET;
+const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
-function renderDebugInfo(extra = {}) {
-  const output = document.getElementById("output");
-  const debugPayload = {
-    localIdentity: resolvedIdentity || {
-      email: "",
-      userId: "",
-      teamId: "",
-      displayName: ""
-    },
-    currentRole,
-    hasSessionToken: Boolean(sessionToken),
-    ...extra
-  };
+const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 
-  output.textContent = JSON.stringify(debugPayload, null, 2);
-}
+const ALLOWED_TEAM_IDS = JSON.parse(process.env.ALLOWED_TEAM_IDS || "[]");
+const SUPERVISOR_EMAILS = new Set(
+  JSON.parse(process.env.SUPERVISOR_EMAILS || "[]").map(v => String(v).toLowerCase())
+);
+const SUPERVISOR_USER_IDS = new Set(JSON.parse(process.env.SUPERVISOR_USER_IDS || "[]"));
 
-async function bootstrapSession() {
-  if (isBootstrapping) {
-    return;
-  }
+const PORT = process.env.PORT || 3000;
+const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 8 * 60 * 60 * 1000);
+const SESSION_PRUNE_INTERVAL_MS = Number(process.env.SESSION_PRUNE_INTERVAL_MS || 15 * 60 * 1000);
 
-  isBootstrapping = true;
+const sessions = new Map();
 
-  try {
-    const identity = await resolveDesktopIdentity();
-
-    const res = await fetch(`${API_URL}/api/session/bootstrap`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(identity)
-    });
-
-    const data = await readJsonResponse(res);
-
-    if (!res.ok) {
-      renderDebugInfo({
-        bootstrapError: data,
-        bootstrapHttpStatus: res.status
-      });
-      throw new Error(data.error || "Session bootstrap failed");
-    }
-
-    if (!data.sessionToken) {
-      renderDebugInfo({
-        bootstrapError: data,
-        bootstrapHttpStatus: res.status
-      });
-      throw new Error("Bootstrap response did not include a session token");
-    }
-
-    sessionToken = data.sessionToken;
-    currentRole = data.role || "viewer";
-
-    document.getElementById("userInfo").textContent =
-      `${data.user?.displayName || "Unknown"}${data.user?.email ? " (" + data.user.email + ")" : ""}`;
-    document.getElementById("roleBadge").textContent = currentRole.toUpperCase();
-
-    applyRoleState();
-
-    renderDebugInfo({
-      bootstrapResponse: data
-    });
-  } finally {
-    isBootstrapping = false;
-  }
-}
-
-function applyRoleState() {
-  const writable = currentRole === "supervisor" || currentRole === "admin";
-
-  document.getElementById("emergencyToggle").disabled = !writable;
-  document.getElementById("prompt").disabled = !writable;
-  document.getElementById("saveBtn").disabled = !writable;
-}
-
-window.onload = async function () {
-  try {
-    await bootstrapSession();
-    await loadEntryPoint(true);
-    startPolling();
-  } catch (err) {
-    renderDebugInfo({
-      initError: err.message
-    });
-  }
+let tokenStore = {
+  accessToken: null,
+  expiresAt: 0
 };
 
-window.onbeforeunload = function () {
-  if (pollHandle) {
-    clearInterval(pollHandle);
-  }
-};
+function pruneExpiredSessions() {
+  const now = Date.now();
 
-function startPolling() {
-  if (pollHandle) {
-    clearInterval(pollHandle);
+  for (const [sid, session] of sessions.entries()) {
+    if (!session || session.expiresAt < now) {
+      sessions.delete(sid);
+    }
   }
-
-  pollHandle = setInterval(async () => {
-    if (isUpdating || isBootstrapping) return;
-    await loadEntryPoint(false);
-  }, POLL_INTERVAL_MS);
 }
 
-async function readJsonResponse(res) {
-  const text = await res.text();
+setInterval(pruneExpiredSessions, SESSION_PRUNE_INTERVAL_MS).unref();
 
-  if (!text) {
-    return {};
+function signSession(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function safeCompare(a, b) {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+
+  if (aBuf.length !== bBuf.length) {
+    return false;
   }
 
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function verifySession(token) {
+  if (!token || !token.includes(".")) return null;
+
+  const [body, sig] = token.split(".");
+  if (!body || !sig) return null;
+
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
+
+  if (!safeCompare(sig, expected)) {
+    return null;
+  }
+
+  let payload;
   try {
-    return JSON.parse(text);
+    payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
   } catch {
-    return { error: text };
+    return null;
   }
+
+  if (!payload.sid || !sessions.has(payload.sid)) return null;
+
+  const stored = sessions.get(payload.sid);
+  if (!stored || stored.expiresAt < Date.now()) {
+    sessions.delete(payload.sid);
+    return null;
+  }
+
+  return stored;
 }
 
-async function authorizedFetch(path, options = {}, retryOn401 = true) {
-  if (!sessionToken) {
-    await bootstrapSession();
+function getRole(user) {
+  const email = String(user.email || "").toLowerCase();
+  const userId = String(user.userId || "");
+  const teamId = String(user.teamId || "");
+
+  const teamRestrictionEnabled = Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0;
+
+  if (teamRestrictionEnabled && !ALLOWED_TEAM_IDS.includes(teamId)) {
+    return "denied";
   }
 
-  const makeRequest = async () => fetch(`${API_URL}${path}`, {
-    ...options,
+  if (SUPERVISOR_EMAILS.has(email) || SUPERVISOR_USER_IDS.has(userId)) {
+    return "supervisor";
+  }
+
+  return "viewer";
+}
+
+async function safeJson(response) {
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${text}`);
+  }
+
+  if (!text || text.trim().startsWith("<")) {
+    throw new Error("Expected JSON response but received invalid content");
+  }
+
+  return JSON.parse(text);
+}
+
+async function refreshServiceAccessToken() {
+  const response = await fetch("https://webexapis.com/v1/access_token", {
+    method: "POST",
     headers: {
-      ...(options.headers || {}),
-      Authorization: `Bearer ${sessionToken}`
-    }
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: WEBEX_CLIENT_ID,
+      client_secret: WEBEX_CLIENT_SECRET,
+      refresh_token: WEBEX_SERVICE_REFRESH_TOKEN
+    })
   });
 
-  let res = await makeRequest();
+  const data = await safeJson(response);
 
-  if (res.status === 401 && retryOn401) {
-    await bootstrapSession();
-    res = await makeRequest();
-  }
+  tokenStore.accessToken = data.access_token;
+  tokenStore.expiresAt = Date.now() + data.expires_in * 1000;
 
-  return res;
+  return tokenStore.accessToken;
 }
 
-async function loadEntryPoint(updateOutput = true) {
-  try {
-    const res = await authorizedFetch(`/api/entrypoint/${ENTRY_POINT_ID}`);
-    const data = await readJsonResponse(res);
+async function getValidServiceToken() {
+  if (!WEBEX_CLIENT_ID || !WEBEX_CLIENT_SECRET || !WEBEX_SERVICE_REFRESH_TOKEN) {
+    throw new Error("Missing Webex service credentials in environment");
+  }
 
-    if (!res.ok) {
-      renderDebugInfo({
-        loadHttpStatus: res.status,
-        loadError: data
-      });
-      throw new Error(data.error || "Load failed");
-    }
+  if (!tokenStore.accessToken || Date.now() >= tokenStore.expiresAt - 60000) {
+    return refreshServiceAccessToken();
+  }
 
-    const toggle = document.getElementById("emergencyToggle");
-    const promptInput = document.getElementById("prompt");
+  return tokenStore.accessToken;
+}
 
-    const emergencyCase = typeof data.emergencyCase === "boolean" ? data.emergencyCase : false;
-    const emergencyPrompt = typeof data.emergencyPrompt === "string" ? data.emergencyPrompt : "";
+function requireSession(req, res, next) {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const session = verifySession(token);
 
-    toggle.checked = emergencyCase;
-    updateLabel();
-
-    const isTypingInPrompt = document.activeElement === promptInput;
-    if (!isTypingInPrompt) {
-      promptInput.value = emergencyPrompt;
-    }
-
-    if (updateOutput) {
-      renderDebugInfo({
-        entryPointResponse: data
-      });
-    }
-  } catch (err) {
-    renderDebugInfo({
-      loadException: err.message
+  if (!session) {
+    return res.status(401).json({
+      error: "Invalid or expired session",
+      code: "SESSION_INVALID",
+      action: "Re-bootstrap the frontend session"
     });
   }
+
+  req.session = session;
+  next();
 }
 
-function updateLabel() {
-  const state = document.getElementById("emergencyToggle").checked;
-  document.getElementById("stateLabel").innerText = state ? "ON" : "OFF";
+function requireWriteRole(req, res, next) {
+  if (!["supervisor", "admin"].includes(req.session.role)) {
+    return res.status(403).json({ error: "Write access requires supervisor role" });
+  }
+
+  next();
 }
 
-async function toggleEmergency() {
-  updateLabel();
-  await saveState("Updating toggle...");
-}
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    entryPointId: ENTRY_POINT_ID,
+    activeSessions: sessions.size,
+    sessionTtlMs: SESSION_TTL_MS,
+    teamRestrictionEnabled: Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0,
+    allowedTeamIds: ALLOWED_TEAM_IDS
+  });
+});
 
-async function updatePrompt() {
-  await saveState("Saving prompt...");
-}
+app.post("/api/session/bootstrap", (req, res) => {
+  pruneExpiredSessions();
 
-async function saveState(statusText) {
-  const EmergencyCase = document.getElementById("emergencyToggle").checked;
-  const EmergencyPrompt = document.getElementById("prompt").value;
+  const user = {
+    email: req.body?.email || "",
+    userId: req.body?.userId || "",
+    teamId: req.body?.teamId || "",
+    displayName: req.body?.displayName || req.body?.email || req.body?.userId || "Unknown User"
+  };
 
+  const role = getRole(user);
+  const teamRestrictionEnabled = Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0;
+
+  if (role === "denied") {
+    return res.status(403).json({
+      error: "User is not in an allowed team",
+      debug: {
+        receivedEmail: user.email,
+        receivedUserId: user.userId,
+        receivedTeamId: user.teamId,
+        allowedTeamIds: ALLOWED_TEAM_IDS,
+        teamRestrictionEnabled
+      }
+    });
+  }
+
+  const sid = crypto.randomUUID();
+  const session = {
+    sid,
+    user,
+    role,
+    expiresAt: Date.now() + SESSION_TTL_MS
+  };
+
+  sessions.set(sid, session);
+
+  const sessionToken = signSession({ sid });
+
+  res.json({
+    sessionToken,
+    role,
+    user,
+    expiresAt: session.expiresAt,
+    debug: {
+      receivedEmail: user.email,
+      receivedUserId: user.userId,
+      receivedTeamId: user.teamId,
+      allowedTeamIds: ALLOWED_TEAM_IDS,
+      teamRestrictionEnabled
+    }
+  });
+});
+
+app.get("/api/entrypoint/:id", requireSession, async (req, res) => {
   try {
-    isUpdating = true;
+    if (req.params.id !== ENTRY_POINT_ID) {
+      return res.status(403).json({ error: "Entrypoint is not allowed" });
+    }
 
-    renderDebugInfo({
-      status: statusText,
-      pendingPayload: {
-        EmergencyCase,
-        EmergencyPrompt
+    const token = await getValidServiceToken();
+    const url = `${WEBEX_BASE_URL}/organization/${WEBEX_ORG_ID}/entry-point/${req.params.id}`;
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
       }
     });
 
-    const res = await authorizedFetch(`/api/entrypoint/${ENTRY_POINT_ID}`, {
+    const data = await safeJson(response);
+
+    const overrides = Array.isArray(data.flowOverrideSettings) ? data.flowOverrideSettings : [];
+    const emergencyCase = overrides.find(o => o.name === "EmergencyCase");
+    const emergencyPrompt = overrides.find(o => o.name === "EmergencyPrompt");
+
+    res.json({
+      ...data,
+      flowOverrideSettings: overrides,
+      emergencyCase: emergencyCase?.value === "true",
+      emergencyPrompt: emergencyPrompt?.value || "",
+      viewerRole: req.session.role
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    if (req.params.id !== ENTRY_POINT_ID) {
+      return res.status(403).json({ error: "Entrypoint is not allowed" });
+    }
+
+    const token = await getValidServiceToken();
+    const url = `${WEBEX_BASE_URL}/organization/${WEBEX_ORG_ID}/entry-point/${req.params.id}`;
+
+    const getRes = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
+      }
+    });
+
+    const entryPoint = await safeJson(getRes);
+    const existingOverrides = Array.isArray(entryPoint.flowOverrideSettings) ? entryPoint.flowOverrideSettings : [];
+
+    const filteredOverrides = existingOverrides.filter(
+      item => item?.name !== "EmergencyCase" && item?.name !== "EmergencyPrompt"
+    );
+
+    entryPoint.flowOverrideSettings = [
+      ...filteredOverrides,
+      {
+        name: "EmergencyCase",
+        type: "BOOLEAN",
+        value: req.body?.EmergencyCase ? "true" : "false"
+      },
+      {
+        name: "EmergencyPrompt",
+        type: "STRING",
+        value: String(req.body?.EmergencyPrompt || "").trim()
+      }
+    ];
+
+    const putRes = await fetch(url, {
       method: "PUT",
       headers: {
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ EmergencyCase, EmergencyPrompt })
+      body: JSON.stringify(entryPoint)
     });
 
-    const data = await readJsonResponse(res);
+    const result = await safeJson(putRes);
 
-    if (!res.ok) {
-      renderDebugInfo({
-        updateHttpStatus: res.status,
-        updateError: data,
-        attemptedPayload: {
-          EmergencyCase,
-          EmergencyPrompt
-        }
-      });
-      throw new Error(data.error || "Update failed");
-    }
-
-    renderDebugInfo({
-      updateResponse: data
-    });
-
-    await loadEntryPoint(false);
+    res.json(result);
   } catch (err) {
-    renderDebugInfo({
-      updateException: err.message,
-      attemptedPayload: {
-        EmergencyCase,
-        EmergencyPrompt
-      }
-    });
-  } finally {
-    isUpdating = false;
+    res.status(500).json({ error: err.message });
   }
-}
+});
+
+app.listen(PORT, () => {
+  console.log(`Secure widget backend listening on port ${PORT}`);
+});
