@@ -9,8 +9,54 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "https://romanrudenko81.github.io";
-app.use(cors({ origin: FRONTEND_ORIGIN }));
+/**
+ * CORS
+ * ----
+ * FRONTEND_ORIGIN kann eine oder mehrere Origins enthalten:
+ * Beispiel:
+ * FRONTEND_ORIGIN=https://romanrudenko81.github.io,https://romanrudenko81.github.io/SupervisorAddOn
+ *
+ * Für WXCC ist wichtig, dass Requests aus dem Desktop / eingebetteten Widget
+ * nicht an einer zu engen Origin-Prüfung scheitern.
+ */
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://romanrudenko81.github.io",
+  "https://cdn.jsdelivr.net",
+  "https://desktop.wxcc-us1.cisco.com",
+  "https://desktop.wxcc-eu1.cisco.com",
+  "https://desktop.wxcc-eu2.cisco.com"
+];
+
+const ENV_ALLOWED_ORIGINS = String(process.env.FRONTEND_ORIGIN || "")
+  .split(",")
+  .map(v => v.trim())
+  .filter(Boolean);
+
+const ALLOWED_CORS_ORIGINS = [...new Set([
+  ...DEFAULT_ALLOWED_ORIGINS,
+  ...ENV_ALLOWED_ORIGINS
+])];
+
+app.use(cors({
+  origin(origin, callback) {
+    // Requests ohne Origin erlauben (z.B. Healthchecks, Curl, Server-zu-Server)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (ALLOWED_CORS_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // Für Debugging bewusst klarer Fehler
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  methods: ["GET", "POST", "PUT", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false
+}));
+
+app.options("*", cors());
 
 const WEBEX_BASE_URL = process.env.WEBEX_BASE_URL || "https://api.wxcc-eu2.cisco.com";
 const WEBEX_ORG_ID = process.env.WEBEX_ORG_ID || "c2e0792b-e4ea-4025-b456-7edc6d1c92cb";
@@ -195,7 +241,8 @@ app.get("/health", (req, res) => {
     activeSessions: sessions.size,
     sessionTtlMs: SESSION_TTL_MS,
     teamRestrictionEnabled: Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0,
-    allowedTeamIds: ALLOWED_TEAM_IDS
+    allowedTeamIds: ALLOWED_TEAM_IDS,
+    corsOrigins: ALLOWED_CORS_ORIGINS
   });
 });
 
@@ -338,6 +385,20 @@ app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+/**
+ * Optional: besser lesbare CORS-Fehler als JSON
+ */
+app.use((err, req, res, next) => {
+  if (err && String(err.message || "").startsWith("CORS blocked")) {
+    return res.status(403).json({
+      error: err.message,
+      allowedOrigins: ALLOWED_CORS_ORIGINS
+    });
+  }
+
+  return next(err);
 });
 
 app.listen(PORT, () => {
