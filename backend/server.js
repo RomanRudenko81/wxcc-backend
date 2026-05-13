@@ -384,7 +384,6 @@ app.get("/api/wallboard/test-agents", async (req, res) => {
             teamId
             teamName
             siteName
-            channelInfo
           }
         }
       }
