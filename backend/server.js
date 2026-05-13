@@ -278,6 +278,62 @@ app.get("/api/wallboard/test-search", async (req, res) => {
   }
 });
 
+app.get("/api/wallboard/schema", async (req, res) => {
+  try {
+    const token = await getValidServiceToken();
+
+    const response = await fetch(`${WEBEX_BASE_URL}/search`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        query: `
+          query IntrospectionQuery {
+            __schema {
+              queryType {
+                name
+                fields {
+                  name
+                  description
+                  args {
+                    name
+                    description
+                    type {
+                      kind
+                      name
+                      ofType {
+                        kind
+                        name
+                      }
+                    }
+                  }
+                  type {
+                    kind
+                    name
+                    ofType {
+                      kind
+                      name
+                    }
+                  }
+                }
+              }
+            }
+          }
+        `
+      })
+    });
+
+    const text = await response.text();
+
+    res.status(response.status).send(text);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/api/session/bootstrap", (req, res) => {
   pruneExpiredSessions();
 
