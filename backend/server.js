@@ -252,6 +252,12 @@ async function getAgentSessions() {
           teamId
           teamName
           siteName
+          channelInfo {
+            channelType
+            currentState
+            idleCodeName
+            lastActivityTime
+          }
         }
       }
     }
@@ -263,6 +269,48 @@ async function getAgentSessions() {
 
   const data = JSON.parse(result.text);
   return data?.data?.agentSession?.agentSessions || [];
+}
+
+function getPrimaryChannelInfo(agent) {
+  const channels = Array.isArray(agent.channelInfo) ? agent.channelInfo : [];
+
+  const telephony = channels.find(channel =>
+    String(channel.channelType || "").toLowerCase() === "telephony"
+  );
+
+  return telephony || channels[0] || null;
+}
+
+function getAgentDisplayState(agent) {
+  const channel = getPrimaryChannelInfo(agent);
+
+  const currentState = String(channel?.currentState || "").trim();
+  const idleCodeName = String(channel?.idleCodeName || "").trim();
+
+  if (idleCodeName) {
+    return idleCodeName;
+  }
+
+  if (currentState) {
+    return currentState;
+  }
+
+  return agent.state || "";
+}
+
+function getAgentStateSinceSeconds(agent) {
+  const channel = getPrimaryChannelInfo(agent);
+  const lastActivityTime = Number(channel?.lastActivityTime || 0);
+
+  if (lastActivityTime > 0) {
+    return Math.max(0, Math.floor((Date.now() - lastActivityTime) / 1000));
+  }
+
+  if (agent.startTime) {
+    return Math.max(0, Math.floor((Date.now() - Number(agent.startTime)) / 1000));
+  }
+
+  return null;
 }
 
 function isAvailableState(state) {
@@ -295,19 +343,29 @@ function buildAgentWallboard(agentSessions) {
 
   return {
     loggedIn: activeAgents.length,
-    available: activeAgents.filter(agent => isAvailableState(agent.state)).length,
+    available: activeAgents.filter(agent => isAvailableState(getAgentDisplayState(agent))).length,
     agentList: activeAgents
       .sort((a, b) => String(a.agentName || "").localeCompare(String(b.agentName || "")))
-      .map(agent => ({
-        name: agent.agentName || "",
-        login: agent.userLoginId || "",
-        state: agent.state || "",
-        teamId: agent.teamId || "",
-        team: agent.teamName || "",
-        site: agent.siteName || "",
-        startTime: agent.startTime || null,
-        activeSinceSeconds: agent.startTime ? Math.max(0, Math.floor((Date.now() - Number(agent.startTime)) / 1000)) : null
-      }))
+      .map(agent => {
+        const channel = getPrimaryChannelInfo(agent);
+        const displayState = getAgentDisplayState(agent);
+
+        return {
+          name: agent.agentName || "",
+          login: agent.userLoginId || "",
+          state: displayState,
+          sessionState: agent.state || "",
+          channelType: channel?.channelType || "",
+          currentState: channel?.currentState || "",
+          idleCodeName: channel?.idleCodeName || "",
+          teamId: agent.teamId || "",
+          team: agent.teamName || "",
+          site: agent.siteName || "",
+          startTime: agent.startTime || null,
+          lastActivityTime: channel?.lastActivityTime || null,
+          activeSinceSeconds: getAgentStateSinceSeconds(agent)
+        };
+      })
   };
 }
 
