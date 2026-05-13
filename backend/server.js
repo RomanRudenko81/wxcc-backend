@@ -47,6 +47,7 @@ const WEBEX_CLIENT_SECRET = process.env.WEBEX_CLIENT_SECRET;
 const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
+const WALLBOARD_TEAM_ID = process.env.WALLBOARD_TEAM_ID || "";
 
 const ALLOWED_TEAM_IDS = JSON.parse(process.env.ALLOWED_TEAM_IDS || "[]");
 const SUPERVISOR_EMAILS = new Set(
@@ -231,6 +232,85 @@ async function postSearchQuery(query, variables = {}) {
   };
 }
 
+async function getAgentSessions() {
+  const now = Date.now();
+  const from = now - 24 * 60 * 60 * 1000;
+  const to = now;
+
+  const result = await postSearchQuery(`
+    query AgentSessionsWallboard($from: Long!, $to: Long!) {
+      agentSession(from: $from, to: $to) {
+        agentSessions {
+          isActive
+          agentId
+          agentName
+          agentSessionId
+          userLoginId
+          startTime
+          endTime
+          state
+          teamId
+          teamName
+          siteName
+        }
+      }
+    }
+  `, { from, to });
+
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(result.text);
+  }
+
+  const data = JSON.parse(result.text);
+  return data?.data?.agentSession?.agentSessions || [];
+}
+
+function isAvailableState(state) {
+  const normalized = String(state || "").toLowerCase();
+
+  return [
+    "available",
+    "idle",
+    "ready"
+  ].includes(normalized);
+}
+
+function buildAgentWallboard(agentSessions) {
+  const activeSessions = agentSessions
+    .filter(agent => agent?.isActive === true)
+    .filter(agent => !WALLBOARD_TEAM_ID || agent.teamId === WALLBOARD_TEAM_ID);
+
+  const uniqueByAgent = new Map();
+
+  activeSessions.forEach(agent => {
+    const key = agent.agentId || agent.userLoginId || agent.agentSessionId;
+    const existing = uniqueByAgent.get(key);
+
+    if (!existing || Number(agent.startTime || 0) > Number(existing.startTime || 0)) {
+      uniqueByAgent.set(key, agent);
+    }
+  });
+
+  const activeAgents = [...uniqueByAgent.values()];
+
+  return {
+    loggedIn: activeAgents.length,
+    available: activeAgents.filter(agent => isAvailableState(agent.state)).length,
+    agentList: activeAgents
+      .sort((a, b) => String(a.agentName || "").localeCompare(String(b.agentName || "")))
+      .map(agent => ({
+        name: agent.agentName || "",
+        login: agent.userLoginId || "",
+        state: agent.state || "",
+        teamId: agent.teamId || "",
+        team: agent.teamName || "",
+        site: agent.siteName || "",
+        startTime: agent.startTime || null,
+        activeSinceSeconds: agent.startTime ? Math.max(0, Math.floor((Date.now() - Number(agent.startTime)) / 1000)) : null
+      }))
+  };
+}
+
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -243,24 +323,36 @@ app.get("/health", (req, res) => {
   });
 });
 
-app.get("/api/wallboard", (req, res) => {
-  res.json({
-    ok: true,
-    source: "wallboard-test-route",
-    entryPointId: ENTRY_POINT_ID,
-    generatedAt: new Date().toISOString(),
-    queue: {
-      callsInQueue: 0,
-      longestWaitingSeconds: 0,
-      avgWaitSeconds: 0,
-      avgHandleSeconds: 0
-    },
-    agents: {
-      loggedIn: 0,
-      available: 0
-    },
-    agentList: []
-  });
+app.get("/api/wallboard", async (req, res) => {
+  try {
+    const agentSessions = await getAgentSessions();
+    const agentWallboard = buildAgentWallboard(agentSessions);
+
+    res.json({
+      ok: true,
+      source: "webex-search-api",
+      entryPointId: ENTRY_POINT_ID,
+      teamFilter: WALLBOARD_TEAM_ID || null,
+      generatedAt: new Date().toISOString(),
+      queue: {
+        callsInQueue: 0,
+        longestWaitingSeconds: 0,
+        avgWaitSeconds: 0,
+        avgHandleSeconds: 0
+      },
+      agents: {
+        loggedIn: agentWallboard.loggedIn,
+        available: agentWallboard.available
+      },
+      agentList: agentWallboard.agentList
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message,
+      generatedAt: new Date().toISOString()
+    });
+  }
 });
 
 app.get("/api/wallboard/test-search", async (req, res) => {
@@ -300,6 +392,10 @@ app.get("/api/wallboard/schema", async (req, res) => {
                 ofType {
                   kind
                   name
+                  ofType {
+                    kind
+                    name
+                  }
                 }
               }
             }
@@ -365,31 +461,12 @@ app.get("/api/wallboard/schema-type/:typeName", async (req, res) => {
 
 app.get("/api/wallboard/test-agents", async (req, res) => {
   try {
-    const now = Date.now();
-    const from = now - 24 * 60 * 60 * 1000;
-    const to = now;
+    const agentSessions = await getAgentSessions();
 
-    const result = await postSearchQuery(`
-      query AgentSessionsTest($from: Long!, $to: Long!) {
-        agentSession(from: $from, to: $to) {
-          agentSessions {
-            isActive
-            agentId
-            agentName
-            agentSessionId
-            userLoginId
-            startTime
-            endTime
-            state
-            teamId
-            teamName
-            siteName
-          }
-        }
-      }
-    `, { from, to });
-
-    res.status(result.status).send(result.text);
+    res.json({
+      count: agentSessions.length,
+      agentSessions
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
