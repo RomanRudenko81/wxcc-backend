@@ -222,6 +222,27 @@ function requireWriteRole(req, res, next) {
   next();
 }
 
+async function postSearchQuery(query) {
+  const token = await getValidServiceToken();
+
+  const response = await fetch(`${WEBEX_BASE_URL}/search`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json"
+    },
+    body: JSON.stringify({ query })
+  });
+
+  const text = await response.text();
+
+  return {
+    status: response.status,
+    text
+  };
+}
+
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -256,23 +277,8 @@ app.get("/api/wallboard", (req, res) => {
 
 app.get("/api/wallboard/test-search", async (req, res) => {
   try {
-    const token = await getValidServiceToken();
-
-    const response = await fetch(`${WEBEX_BASE_URL}/search`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      body: JSON.stringify({
-        query: "{ __typename }"
-      })
-    });
-
-    const text = await response.text();
-
-    res.status(response.status).send(text);
+    const result = await postSearchQuery("{ __typename }");
+    res.status(result.status).send(result.text);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -280,55 +286,137 @@ app.get("/api/wallboard/test-search", async (req, res) => {
 
 app.get("/api/wallboard/schema", async (req, res) => {
   try {
-    const token = await getValidServiceToken();
-
-    const response = await fetch(`${WEBEX_BASE_URL}/search`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json"
-      },
-      body: JSON.stringify({
-        query: `
-          query IntrospectionQuery {
-            __schema {
-              queryType {
+    const result = await postSearchQuery(`
+      query IntrospectionQuery {
+        __schema {
+          queryType {
+            name
+            fields {
+              name
+              description
+              args {
                 name
-                fields {
+                description
+                type {
+                  kind
                   name
-                  description
-                  args {
-                    name
-                    description
-                    type {
-                      kind
-                      name
-                      ofType {
-                        kind
-                        name
-                      }
-                    }
-                  }
-                  type {
+                  ofType {
                     kind
                     name
-                    ofType {
-                      kind
-                      name
-                    }
                   }
+                }
+              }
+              type {
+                kind
+                name
+                ofType {
+                  kind
+                  name
                 }
               }
             }
           }
-        `
-      })
-    });
+        }
+      }
+    `);
 
-    const text = await response.text();
+    res.status(result.status).send(result.text);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    res.status(response.status).send(text);
+app.get("/api/wallboard/schema-types", async (req, res) => {
+  try {
+    const result = await postSearchQuery(`
+      query TypeInspection {
+        taskList: __type(name: "TaskList") {
+          name
+          kind
+          fields {
+            name
+            description
+            type {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
+          }
+        }
+
+        taskDetailsList: __type(name: "TaskDetailsList") {
+          name
+          kind
+          fields {
+            name
+            description
+            type {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
+          }
+        }
+
+        agentSessions: __type(name: "AgentSessions") {
+          name
+          kind
+          fields {
+            name
+            description
+            type {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
+          }
+        }
+
+        taskLegDetailsList: __type(name: "TaskLegDetailsList") {
+          name
+          kind
+          fields {
+            name
+            description
+            type {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
+          }
+        }
+      }
+    `);
+
+    res.status(result.status).send(result.text);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
