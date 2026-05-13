@@ -9,16 +9,6 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-/**
- * CORS
- * ----
- * FRONTEND_ORIGIN kann eine oder mehrere Origins enthalten:
- * Beispiel:
- * FRONTEND_ORIGIN=https://romanrudenko81.github.io,https://romanrudenko81.github.io/SupervisorAddOn
- *
- * Für WXCC ist wichtig, dass Requests aus dem Desktop / eingebetteten Widget
- * nicht an einer zu engen Origin-Prüfung scheitern.
- */
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://romanrudenko81.github.io",
   "https://cdn.jsdelivr.net",
@@ -39,7 +29,6 @@ const ALLOWED_CORS_ORIGINS = [...new Set([
 
 app.use(cors({
   origin(origin, callback) {
-    // Requests ohne Origin erlauben (z.B. Healthchecks, Curl, Server-zu-Server)
     if (!origin) {
       return callback(null, true);
     }
@@ -48,7 +37,6 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // Für Debugging bewusst klarer Fehler
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "PUT", "OPTIONS"],
@@ -246,6 +234,26 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.get("/api/wallboard", (req, res) => {
+  res.json({
+    ok: true,
+    source: "wallboard-test-route",
+    entryPointId: ENTRY_POINT_ID,
+    generatedAt: new Date().toISOString(),
+    queue: {
+      callsInQueue: 0,
+      longestWaitingSeconds: 0,
+      avgWaitSeconds: 0,
+      avgHandleSeconds: 0
+    },
+    agents: {
+      loggedIn: 0,
+      available: 0
+    },
+    agentList: []
+  });
+});
+
 app.post("/api/session/bootstrap", (req, res) => {
   pruneExpiredSessions();
 
@@ -387,9 +395,6 @@ app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res
   }
 });
 
-/**
- * Optional: besser lesbare CORS-Fehler als JSON
- */
 app.use((err, req, res, next) => {
   if (err && String(err.message || "").startsWith("CORS blocked")) {
     return res.status(403).json({
