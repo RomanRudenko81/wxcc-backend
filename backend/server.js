@@ -222,7 +222,7 @@ function requireWriteRole(req, res, next) {
   next();
 }
 
-async function postSearchQuery(query) {
+async function postSearchQuery(query, variables = {}) {
   const token = await getValidServiceToken();
 
   const response = await fetch(`${WEBEX_BASE_URL}/search`, {
@@ -232,7 +232,7 @@ async function postSearchQuery(query) {
       "Content-Type": "application/json",
       Accept: "application/json"
     },
-    body: JSON.stringify({ query })
+    body: JSON.stringify({ query, variables })
   });
 
   const text = await response.text();
@@ -326,11 +326,31 @@ app.get("/api/wallboard/schema", async (req, res) => {
   }
 });
 
-app.get("/api/wallboard/schema-types", async (req, res) => {
+app.get("/api/wallboard/schema-type/:typeName", async (req, res) => {
   try {
+    const allowedTypes = new Set([
+      "TaskList",
+      "TaskDetailsList",
+      "AgentSessions",
+      "TaskLegDetailsList",
+      "Task",
+      "TaskDetails",
+      "AgentSession",
+      "TaskLegDetails"
+    ]);
+
+    const typeName = String(req.params.typeName || "").trim();
+
+    if (!allowedTypes.has(typeName)) {
+      return res.status(400).json({
+        error: "Type is not allowed for schema inspection",
+        allowedTypes: [...allowedTypes]
+      });
+    }
+
     const result = await postSearchQuery(`
-      query TypeInspection {
-        taskList: __type(name: "TaskList") {
+      query TypeInspection($typeName: String!) {
+        __type(name: $typeName) {
           name
           kind
           fields {
@@ -342,79 +362,12 @@ app.get("/api/wallboard/schema-types", async (req, res) => {
               ofType {
                 kind
                 name
-                ofType {
-                  kind
-                  name
-                }
-              }
-            }
-          }
-        }
-
-        taskDetailsList: __type(name: "TaskDetailsList") {
-          name
-          kind
-          fields {
-            name
-            description
-            type {
-              kind
-              name
-              ofType {
-                kind
-                name
-                ofType {
-                  kind
-                  name
-                }
-              }
-            }
-          }
-        }
-
-        agentSessions: __type(name: "AgentSessions") {
-          name
-          kind
-          fields {
-            name
-            description
-            type {
-              kind
-              name
-              ofType {
-                kind
-                name
-                ofType {
-                  kind
-                  name
-                }
-              }
-            }
-          }
-        }
-
-        taskLegDetailsList: __type(name: "TaskLegDetailsList") {
-          name
-          kind
-          fields {
-            name
-            description
-            type {
-              kind
-              name
-              ofType {
-                kind
-                name
-                ofType {
-                  kind
-                  name
-                }
               }
             }
           }
         }
       }
-    `);
+    `, { typeName });
 
     res.status(result.status).send(result.text);
   } catch (err) {
