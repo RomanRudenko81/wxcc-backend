@@ -420,7 +420,7 @@ app.get("/api/wallboard/schema-type/:typeName", async (req, res) => {
       "Task",
       "TaskDetails",
       "AgentSession",
-      "TaskLegDetails"
+      "TaskLegDetails",
       "AgentChannelInfo"
     ]);
 
