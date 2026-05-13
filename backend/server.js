@@ -29,14 +29,8 @@ const ALLOWED_CORS_ORIGINS = [...new Set([
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    if (ALLOWED_CORS_ORIGINS.includes(origin)) {
-      return callback(null, true);
-    }
-
+    if (!origin) return callback(null, true);
+    if (ALLOWED_CORS_ORIGINS.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "PUT", "OPTIONS"],
@@ -94,9 +88,7 @@ function safeCompare(a, b) {
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);
 
-  if (aBuf.length !== bBuf.length) {
-    return false;
-  }
+  if (aBuf.length !== bBuf.length) return false;
 
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
@@ -109,9 +101,7 @@ function verifySession(token) {
 
   const expected = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
 
-  if (!safeCompare(sig, expected)) {
-    return null;
-  }
+  if (!safeCompare(sig, expected)) return null;
 
   let payload;
   try {
@@ -138,9 +128,7 @@ function getRole(user) {
 
   const teamRestrictionEnabled = Array.isArray(ALLOWED_TEAM_IDS) && ALLOWED_TEAM_IDS.length > 0;
 
-  if (teamRestrictionEnabled && !ALLOWED_TEAM_IDS.includes(teamId)) {
-    return "denied";
-  }
+  if (teamRestrictionEnabled && !ALLOWED_TEAM_IDS.includes(teamId)) return "denied";
 
   if (SUPERVISOR_EMAILS.has(email) || SUPERVISOR_USER_IDS.has(userId)) {
     return "supervisor";
@@ -368,6 +356,39 @@ app.get("/api/wallboard/schema-type/:typeName", async (req, res) => {
         }
       }
     `, { typeName });
+
+    res.status(result.status).send(result.text);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/wallboard/test-agents", async (req, res) => {
+  try {
+    const now = Date.now();
+    const from = now - 24 * 60 * 60 * 1000;
+    const to = now;
+
+    const result = await postSearchQuery(`
+      query AgentSessionsTest($from: Long!, $to: Long!) {
+        agentSession(from: $from, to: $to) {
+          agentSessions {
+            isActive
+            agentId
+            agentName
+            agentSessionId
+            userLoginId
+            startTime
+            endTime
+            state
+            teamId
+            teamName
+            siteName
+            channelInfo
+          }
+        }
+      }
+    `, { from, to });
 
     res.status(result.status).send(result.text);
   } catch (err) {
