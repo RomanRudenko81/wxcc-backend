@@ -271,6 +271,61 @@ async function getAgentSessions() {
   return data?.data?.agentSession?.agentSessions || [];
 }
 
+async function getTaskDetails() {
+  const now = Date.now();
+  const from = now - 24 * 60 * 60 * 1000;
+  const to = now;
+
+  const result = await postSearchQuery(`
+    query TaskDetailsWallboard($from: Long!, $to: Long!) {
+      taskDetails(from: $from, to: $to) {
+        tasks {
+          id
+          status
+          channelType
+          createdTime
+          endedTime
+          direction
+          isActive
+          isContactHandled
+          isContactOffered
+          abandonedType
+          contactHandleType
+          queueDuration
+          connectedDuration
+          totalDuration
+          lastActivityTime
+          firstQueueId
+          firstQueueName
+          lastQueue {
+            id
+            name
+          }
+          lastEntryPoint {
+            id
+            name
+          }
+          lastTeam {
+            id
+            name
+          }
+          lastAgent {
+            id
+            name
+          }
+        }
+      }
+    }
+  `, { from, to });
+
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(result.text);
+  }
+
+  const data = JSON.parse(result.text);
+  return data?.data?.taskDetails?.tasks || [];
+}
+
 function getPrimaryChannelInfo(agent) {
   const channels = Array.isArray(agent.channelInfo) ? agent.channelInfo : [];
 
@@ -438,6 +493,27 @@ app.get("/api/wallboard/test-agents", async (req, res) => {
   }
 });
 
+app.get("/api/wallboard/test-tasks", async (req, res) => {
+  try {
+    const tasks = await getTaskDetails();
+
+    const activeTelephonyTasks = tasks.filter(task =>
+      task?.isActive === true &&
+      String(task?.channelType || "").toLowerCase() === "telephony"
+    );
+
+    res.json({
+      count: tasks.length,
+      activeTelephonyCount: activeTelephonyTasks.length,
+      generatedAt: new Date().toISOString(),
+      activeTelephonyTasks,
+      tasks: tasks.slice(0, 50)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/wallboard/schema-type/:typeName", async (req, res) => {
   try {
     const allowedTypes = new Set([
@@ -561,7 +637,6 @@ app.get("/api/entrypoint/:id", requireSession, async (req, res) => {
     });
 
     const data = await safeJson(response);
-
     const overrides = Array.isArray(data.flowOverrideSettings) ? data.flowOverrideSettings : [];
 
     res.json({
