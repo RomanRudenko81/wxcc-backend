@@ -162,6 +162,20 @@ function requireSession(req, res, next) {
   next();
 }
 
+function requireWriteRole(req, res, next) {
+  if (
+    !["supervisor", "admin"].includes(
+      req.session.role
+    )
+  ) {
+    return res.status(403).json({
+      error: "Write access denied"
+    });
+  }
+
+  next();
+}
+
 function getRole(user) {
   const email = String(user.email || "").toLowerCase();
   const userId = String(user.userId || "");
@@ -230,6 +244,40 @@ async function getValidServiceToken() {
   }
 
   return tokenStore.accessToken;
+}
+
+async function getEntryPoint(id) {
+  const token = await getValidServiceToken();
+
+  const response = await fetch(
+    `${WEBEX_BASE_URL}/organization/${WEBEX_ORG_ID}/entry-point/${id}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
+      }
+    }
+  );
+
+  return safeJson(response);
+}
+
+async function updateEntryPoint(id, payload) {
+  const token = await getValidServiceToken();
+
+  const response = await fetch(
+    `${WEBEX_BASE_URL}/organization/${WEBEX_ORG_ID}/entry-point/${id}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    }
+  );
+
+  return safeJson(response);
 }
 
 async function postSearchQuery(query, variables = {}) {
@@ -457,6 +505,51 @@ app.post("/api/session/bootstrap", (req, res) => {
     expiresAt: session.expiresAt
   });
 });
+
+app.get(
+  "/api/entrypoint/:id",
+  requireSession,
+  async (req, res) => {
+    try {
+      const data = await getEntryPoint(
+        req.params.id
+      );
+
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({
+        error: err.message
+      });
+    }
+  }
+);
+
+app.put(
+  "/api/entrypoint/:id",
+  requireSession,
+  requireWriteRole,
+  async (req, res) => {
+    try {
+      const existing =
+        await getEntryPoint(req.params.id);
+
+      existing.flowOverrideSettings =
+        req.body.flowOverrideSettings || [];
+
+      const updated =
+        await updateEntryPoint(
+          req.params.id,
+          existing
+        );
+
+      res.json(updated);
+    } catch (err) {
+      res.status(500).json({
+        error: err.message
+      });
+    }
+  }
+);
 
 app.get(
   "/api/wallboard",
