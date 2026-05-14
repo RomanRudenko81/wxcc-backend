@@ -30,11 +30,7 @@ const ALLOWED_CORS_ORIGINS = [...new Set([
 app.use(cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true);
-
-    if (ALLOWED_CORS_ORIGINS.includes(origin)) {
-      return callback(null, true);
-    }
-
+    if (ALLOWED_CORS_ORIGINS.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   methods: ["GET", "POST", "PUT", "OPTIONS"],
@@ -76,15 +72,12 @@ let tokenStore = {
 function safeCompare(a, b) {
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);
-
   if (aBuf.length !== bBuf.length) return false;
-
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
 function signSession(payload) {
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-
   const sig = crypto
     .createHmac("sha256", SESSION_SECRET)
     .update(body)
@@ -128,7 +121,6 @@ function verifySession(token) {
 function requireSession(req, res, next) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-
   const session = verifySession(token);
 
   if (!session) {
@@ -251,10 +243,7 @@ async function postSearchQuery(query, variables = {}) {
       "Content-Type": "application/json",
       Accept: "application/json"
     },
-    body: JSON.stringify({
-      query,
-      variables
-    })
+    body: JSON.stringify({ query, variables })
   });
 
   const text = await response.text();
@@ -316,6 +305,8 @@ async function getTaskDetails() {
           channelType
           createdTime
           endedTime
+          origin
+          destination
           direction
           isActive
           isContactHandled
@@ -373,13 +364,8 @@ function getDisplayState(agent) {
   const currentState = String(channel?.currentState || "").toLowerCase();
   const idleCodeName = String(channel?.idleCodeName || "").trim();
 
-  if (currentState === "available") {
-    return "Available";
-  }
-
-  if (currentState === "idle" && idleCodeName) {
-    return idleCodeName;
-  }
+  if (currentState === "available") return "Available";
+  if (currentState === "idle" && idleCodeName) return idleCodeName;
 
   if (currentState) {
     return currentState.charAt(0).toUpperCase() + currentState.slice(1);
@@ -425,10 +411,8 @@ app.post("/api/session/bootstrap", (req, res) => {
 
   sessions.set(sid, session);
 
-  const sessionToken = signSession({ sid });
-
   res.json({
-    sessionToken,
+    sessionToken: signSession({ sid }),
     role,
     user,
     expiresAt: session.expiresAt
@@ -449,11 +433,8 @@ app.get("/api/entrypoint/:id", requireSession, async (req, res) => {
 app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res) => {
   try {
     const existing = await getEntryPoint(req.params.id);
-
     existing.flowOverrideSettings = req.body.flowOverrideSettings || [];
-
     const updated = await updateEntryPoint(req.params.id, existing);
-
     res.json(updated);
   } catch (err) {
     res.status(500).json({
@@ -489,28 +470,20 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
       t => String(t.status).toLowerCase() === "connected"
     );
 
-    const kpiTasks = [...teamTasks];
-
     const avgWaitSeconds =
-      kpiTasks.length > 0
+      teamTasks.length > 0
         ? Math.round(
-            kpiTasks.reduce(
-              (sum, t) => sum + Number(t.queueDuration || 0),
-              0
-            ) /
-              kpiTasks.length /
+            teamTasks.reduce((sum, t) => sum + Number(t.queueDuration || 0), 0) /
+              teamTasks.length /
               1000
           )
         : 0;
 
     const avgHandleSeconds =
-      kpiTasks.length > 0
+      teamTasks.length > 0
         ? Math.round(
-            kpiTasks.reduce(
-              (sum, t) => sum + Number(t.connectedDuration || 0),
-              0
-            ) /
-              kpiTasks.length /
+            teamTasks.reduce((sum, t) => sum + Number(t.connectedDuration || 0), 0) /
+              teamTasks.length /
               1000
           )
         : 0;
@@ -568,6 +541,7 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
       taskList: teamTasks.map(task => ({
         id: task.id,
         status: task.status,
+        caller: task.origin || "",
         queue: task?.lastQueue?.name || "",
         firstQueue: task?.firstQueueName || "",
         entryPoint: task?.lastEntryPoint?.name || "",
@@ -579,6 +553,7 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
       waitingTaskList: waitingTasks.map(task => ({
         id: task.id,
         status: task.status,
+        caller: task.origin || "",
         queue: task?.lastQueue?.name || "",
         firstQueue: task?.firstQueueName || "",
         entryPoint: task?.lastEntryPoint?.name || "",
@@ -591,37 +566,6 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
   } catch (err) {
     res.status(500).json({
       ok: false,
-      error: err.message
-    });
-  }
-});
-
-app.get("/api/wallboard/test-tasks", async (req, res) => {
-  try {
-    const tasks = await getTaskDetails();
-
-    const telephonyTasks = tasks.filter(
-      t => String(t.channelType || "").toLowerCase() === "telephony"
-    );
-
-    const activeTelephonyTasks = telephonyTasks.filter(t => t?.isActive === true);
-
-    const possibleWaitingTasks = activeTelephonyTasks.filter(t =>
-      ["new", "parked", "connected"].includes(String(t.status || "").toLowerCase())
-    );
-
-    res.json({
-      count: tasks.length,
-      telephonyCount: telephonyTasks.length,
-      activeTelephonyCount: activeTelephonyTasks.length,
-      possibleWaitingOrActiveCount: possibleWaitingTasks.length,
-      generatedAt: new Date().toISOString(),
-      activeTelephonyTasks,
-      possibleWaitingTasks,
-      tasks: tasks.slice(0, 50)
-    });
-  } catch (err) {
-    res.status(500).json({
       error: err.message
     });
   }
