@@ -406,6 +406,16 @@ function getDisplayState(agent) {
   return agent.state || "";
 }
 
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    entryPointId: ENTRY_POINT_ID,
+    activeSessions: sessions.size,
+    sessionTtlMs: SESSION_TTL_MS,
+    corsOrigins: ALLOWED_CORS_ORIGINS
+  });
+});
+
 app.post("/api/session/bootstrap", (req, res) => {
   const user = {
     email: req.body?.email || "",
