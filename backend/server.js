@@ -449,7 +449,10 @@ app.get("/api/wallboard/schema-type/:typeName", async (req, res) => {
       "TaskDetails",
       "AgentSession",
       "TaskLegDetails",
-      "AgentChannelInfo"
+      "AgentChannelInfo",
+      "Queue",
+      "QueueStats",
+      "TaskQueue"
     ]);
 
     const typeName = String(req.params.typeName || "").trim();
