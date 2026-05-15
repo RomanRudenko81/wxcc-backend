@@ -118,10 +118,17 @@ function verifySession(token) {
   return stored;
 }
 
-function requireSession(req, res, next) {
+function getSessionFromRequest(req) {
   const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  const session = verifySession(token);
+  const bearerToken = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const queryToken = typeof req.query?.token === "string" ? req.query.token : "";
+  const token = bearerToken || queryToken;
+
+  return verifySession(token);
+}
+
+function requireSession(req, res, next) {
+  const session = getSessionFromRequest(req);
 
   if (!session) {
     return res.status(401).json({
@@ -805,6 +812,199 @@ app.get("/api/debug/queues", requireSession, async (req, res) => {
       error: err.message
     });
   }
+});
+
+
+
+function redactForDebug(value, depth = 0) {
+  if (depth > 6) return "[MaxDepth]";
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map(item => redactForDebug(item, depth + 1));
+  }
+
+  if (value && typeof value === "object") {
+    const result = {};
+
+    for (const [key, val] of Object.entries(value)) {
+      const lowerKey = key.toLowerCase();
+
+      if (
+        lowerKey.includes("token") ||
+        lowerKey.includes("secret") ||
+        lowerKey.includes("password") ||
+        lowerKey.includes("authorization")
+      ) {
+        result[key] = "[REDACTED]";
+      } else {
+        result[key] = redactForDebug(val, depth + 1);
+      }
+    }
+
+    return result;
+  }
+
+  return value;
+}
+
+function summarizePayload(payload) {
+  const isArray = Array.isArray(payload);
+  const root = isArray ? payload : (payload && typeof payload === "object" ? payload : {});
+  const keys = payload && typeof payload === "object" ? Object.keys(payload) : [];
+
+  const arrays = [];
+
+  if (payload && typeof payload === "object") {
+    for (const [key, value] of Object.entries(payload)) {
+      if (Array.isArray(value)) {
+        arrays.push({
+          key,
+          length: value.length,
+          sample: redactForDebug(value.slice(0, 3))
+        });
+      }
+    }
+  }
+
+  return {
+    type: isArray ? "array" : typeof payload,
+    keys,
+    arrayLength: isArray ? payload.length : undefined,
+    arrays,
+    sample: redactForDebug(isArray ? payload.slice(0, 5) : root)
+  };
+}
+
+async function fetchConfigRaw(path) {
+  const token = await getValidServiceToken();
+
+  const response = await fetch(`${WEBEX_BASE_URL}${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json"
+    }
+  });
+
+  const text = await response.text();
+
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  return {
+    path,
+    status: response.status,
+    ok: response.ok,
+    contentType: response.headers.get("content-type") || "",
+    text: json ? undefined : text.slice(0, 2000),
+    json
+  };
+}
+
+function getAccessDiscoveryEndpoints(user) {
+  const userId = encodeURIComponent(user?.userId || "");
+  const email = encodeURIComponent(user?.email || "");
+  const configured = String(process.env.WXCC_ACCESS_DISCOVERY_ENDPOINTS || "")
+    .split(",")
+    .map(v => v.trim())
+    .filter(Boolean);
+
+  if (configured.length) return configured;
+
+  const candidates = [
+    `/organization/${WEBEX_ORG_ID}/user-profile`,
+    `/organization/${WEBEX_ORG_ID}/user-profiles`,
+    `/organization/${WEBEX_ORG_ID}/access-profile`,
+    `/organization/${WEBEX_ORG_ID}/access-profiles`,
+    `/organization/${WEBEX_ORG_ID}/resource-collection`,
+    `/organization/${WEBEX_ORG_ID}/resource-collections`,
+    `/organization/${WEBEX_ORG_ID}/contact-center-user`,
+    `/organization/${WEBEX_ORG_ID}/contact-center-users`,
+    `/organization/${WEBEX_ORG_ID}/user`,
+    `/organization/${WEBEX_ORG_ID}/users`,
+    `/organization/${WEBEX_ORG_ID}/queue`,
+    `/organization/${WEBEX_ORG_ID}/queues`,
+    `/organization/${WEBEX_ORG_ID}/contact-service-queue`,
+    `/organization/${WEBEX_ORG_ID}/contact-service-queues`
+  ];
+
+  if (userId) {
+    candidates.push(
+      `/organization/${WEBEX_ORG_ID}/contact-center-user/${userId}`,
+      `/organization/${WEBEX_ORG_ID}/contact-center-users/${userId}`,
+      `/organization/${WEBEX_ORG_ID}/user/${userId}`,
+      `/organization/${WEBEX_ORG_ID}/users/${userId}`,
+      `/organization/${WEBEX_ORG_ID}/user-profile/${userId}`,
+      `/organization/${WEBEX_ORG_ID}/access-profile/${userId}`
+    );
+  }
+
+  if (email) {
+    candidates.push(
+      `/organization/${WEBEX_ORG_ID}/contact-center-user?email=${email}`,
+      `/organization/${WEBEX_ORG_ID}/contact-center-users?email=${email}`,
+      `/organization/${WEBEX_ORG_ID}/users?email=${email}`
+    );
+  }
+
+  return candidates;
+}
+
+app.get("/api/debug/access-discovery", requireSession, async (req, res) => {
+  const user = req.session?.user || {};
+  const raw = String(req.query?.raw || "") === "1";
+  const endpoints = getAccessDiscoveryEndpoints(user);
+  const results = [];
+
+  for (const endpoint of endpoints) {
+    try {
+      const result = await fetchConfigRaw(endpoint);
+
+      results.push({
+        path: result.path,
+        status: result.status,
+        ok: result.ok,
+        contentType: result.contentType,
+        ...(result.ok && result.json
+          ? { summary: summarizePayload(result.json), raw: raw ? redactForDebug(result.json) : undefined }
+          : { errorText: result.text })
+      });
+    } catch (err) {
+      results.push({
+        path: endpoint,
+        ok: false,
+        error: err.message
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    purpose: "Discover WXCC user profile, access profile, resource collection and queue config endpoints",
+    user: {
+      email: user.email || "",
+      userId: user.userId || "",
+      teamId: user.teamId || "",
+      displayName: user.displayName || ""
+    },
+    raw,
+    endpointCount: results.length,
+    results
+  });
+});
+
+app.get("/api/debug/session", requireSession, (req, res) => {
+  res.json({
+    ok: true,
+    session: {
+      role: req.session.role,
+      user: req.session.user,
+      expiresAt: req.session.expiresAt
+    }
+  });
 });
 
 
