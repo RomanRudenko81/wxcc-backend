@@ -772,6 +772,12 @@ function queueNameAllowed(queueName, allowedQueues) {
 
 const WALLBOARD_DATA_CACHE_TTL_MS = Number(process.env.WALLBOARD_DATA_CACHE_TTL_MS || 5000);
 const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
+const WXCC_EVENT_WEBHOOK_SECRET = process.env.WXCC_EVENT_WEBHOOK_SECRET || "";
+const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 500);
+
+const wallboardSseClients = new Set();
+let lastWxccEvent = null;
+let eventRefreshTimer = null;
 
 let wallboardDataCache = {
   updatedAt: 0,
@@ -952,6 +958,76 @@ function writeSseEvent(res, eventName, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function broadcastSseEvent(eventName, payload) {
+  for (const client of wallboardSseClients) {
+    try {
+      writeSseEvent(client.res, eventName, payload);
+    } catch {
+      wallboardSseClients.delete(client);
+    }
+  }
+}
+
+async function pushWallboardUpdateToClient(client, force = false) {
+  try {
+    const payload = await buildWallboardPayload(client.session, force);
+    const serialized = JSON.stringify(payload);
+
+    if (serialized !== client.lastPayload || force) {
+      client.lastPayload = serialized;
+      writeSseEvent(client.res, "wallboard", payload);
+    }
+  } catch (err) {
+    writeSseEvent(client.res, "error", {
+      ok: false,
+      error: err.message
+    });
+  }
+}
+
+function scheduleEventDrivenWallboardRefresh(reason = "wxcc-event") {
+  if (eventRefreshTimer) {
+    clearTimeout(eventRefreshTimer);
+  }
+
+  eventRefreshTimer = setTimeout(async () => {
+    try {
+      await getWallboardSourceData(true);
+
+      for (const client of wallboardSseClients) {
+        await pushWallboardUpdateToClient(client, true);
+      }
+
+      broadcastSseEvent("event-refresh", {
+        ok: true,
+        reason,
+        generatedAt: new Date().toISOString(),
+        clientCount: wallboardSseClients.size
+      });
+    } catch (err) {
+      broadcastSseEvent("error", {
+        ok: false,
+        reason,
+        error: err.message
+      });
+    }
+  }, EVENT_REFRESH_DEBOUNCE_MS);
+}
+
+function isWebhookSecretValid(req) {
+  if (!WXCC_EVENT_WEBHOOK_SECRET) return true;
+
+  const headerSecret =
+    req.headers["x-wxcc-event-secret"] ||
+    req.headers["x-webhook-secret"] ||
+    req.headers["x-hook-secret"] ||
+    req.headers["x-cisco-webex-contact-center-secret"];
+
+  const querySecret = req.query?.secret;
+
+  return String(headerSecret || querySecret || "") === WXCC_EVENT_WEBHOOK_SECRET;
+}
+
 app.get("/api/wallboard", requireSession, async (req, res) => {
   try {
     const payload = await buildWallboardPayload(req.session, false);
@@ -963,6 +1039,7 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
     });
   }
 });
+
 
 app.get("/api/wallboard/stream", async (req, res) => {
   const session = getSessionFromRequest(req);
@@ -986,52 +1063,109 @@ app.get("/api/wallboard/stream", async (req, res) => {
     res.flushHeaders();
   }
 
-  let closed = false;
-  let lastPayload = "";
-
-  const sendUpdate = async (force = false) => {
-    if (closed) return;
-
-    try {
-      const payload = await buildWallboardPayload(req.session, force);
-      const serialized = JSON.stringify(payload);
-
-      if (serialized !== lastPayload || force) {
-        lastPayload = serialized;
-        writeSseEvent(res, "wallboard", payload);
-      }
-    } catch (err) {
-      writeSseEvent(res, "error", {
-        ok: false,
-        error: err.message
-      });
-    }
+  const client = {
+    id: crypto.randomUUID(),
+    session,
+    res,
+    lastPayload: ""
   };
+
+  wallboardSseClients.add(client);
 
   writeSseEvent(res, "ready", {
     ok: true,
+    mode: "event-bridge",
     generatedAt: new Date().toISOString(),
-    refreshMs: WALLBOARD_DATA_CACHE_TTL_MS
+    fallbackRefreshMs: WALLBOARD_DATA_CACHE_TTL_MS,
+    eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS
   });
 
-  await sendUpdate(true);
+  await pushWallboardUpdateToClient(client, true);
 
-  const updateTimer = setInterval(() => {
-    sendUpdate(false);
+  const fallbackTimer = setInterval(() => {
+    pushWallboardUpdateToClient(client, false);
   }, WALLBOARD_DATA_CACHE_TTL_MS);
 
   const heartbeatTimer = setInterval(() => {
-    if (!closed) {
-      res.write(`: heartbeat ${Date.now()}\n\n`);
-    }
+    res.write(`: heartbeat ${Date.now()}\n\n`);
   }, SSE_HEARTBEAT_MS);
 
   req.on("close", () => {
-    closed = true;
-    clearInterval(updateTimer);
+    wallboardSseClients.delete(client);
+    clearInterval(fallbackTimer);
     clearInterval(heartbeatTimer);
   });
 });
+
+app.post("/api/wxcc/events", (req, res) => {
+  if (!isWebhookSecretValid(req)) {
+    return res.status(401).json({
+      ok: false,
+      error: "Invalid webhook secret"
+    });
+  }
+
+  lastWxccEvent = {
+    receivedAt: new Date().toISOString(),
+    headers: {
+      event: req.headers["x-event-type"] || req.headers["x-webhook-event"] || "",
+      resource: req.headers["x-resource"] || "",
+      deliveryId: req.headers["x-webhook-delivery"] || req.headers["x-request-id"] || ""
+    },
+    body: req.body || {}
+  };
+
+  broadcastSseEvent("wxcc-event", {
+    ok: true,
+    receivedAt: lastWxccEvent.receivedAt,
+    headers: lastWxccEvent.headers
+  });
+
+  scheduleEventDrivenWallboardRefresh("wxcc-webhook");
+
+  res.json({
+    ok: true,
+    receivedAt: lastWxccEvent.receivedAt
+  });
+});
+
+app.post("/api/wxcc/events/test", requireSession, (req, res) => {
+  lastWxccEvent = {
+    receivedAt: new Date().toISOString(),
+    headers: {
+      event: "manual-test",
+      resource: "manual-test",
+      deliveryId: crypto.randomUUID()
+    },
+    body: req.body || {}
+  };
+
+  broadcastSseEvent("wxcc-event", {
+    ok: true,
+    receivedAt: lastWxccEvent.receivedAt,
+    headers: lastWxccEvent.headers
+  });
+
+  scheduleEventDrivenWallboardRefresh("manual-test");
+
+  res.json({
+    ok: true,
+    message: "Manual event accepted. Wallboard refresh scheduled.",
+    receivedAt: lastWxccEvent.receivedAt
+  });
+});
+
+app.get("/api/debug/events", requireSession, (req, res) => {
+  res.json({
+    ok: true,
+    sseClients: wallboardSseClients.size,
+    lastWxccEvent,
+    fallbackRefreshMs: WALLBOARD_DATA_CACHE_TTL_MS,
+    eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS,
+    webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET)
+  });
+});
+
 
 
 app.get("/api/debug/profile-queues", requireSession, async (req, res) => {
