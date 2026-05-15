@@ -460,11 +460,27 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
       .filter(t => String(t.channelType).toLowerCase() === "telephony")
       .filter(t => t?.lastTeam?.id === userTeamId);
 
+    // Detect all queues dynamically used by this team
+    const allowedQueues = Array.from(
+      new Set(
+        teamTasks
+          .map(t => t?.lastQueue?.name || t?.firstQueueName || "")
+          .filter(Boolean)
+      )
+    );
+
     const waitingTasks = allTasks
       .filter(t => String(t.channelType).toLowerCase() === "telephony")
       .filter(t => t?.isActive === true)
       .filter(t => ["new", "parked"].includes(String(t.status).toLowerCase()))
-      .filter(t => t?.lastEntryPoint?.id === ENTRY_POINT_ID);
+      .filter(t => {
+        const queueName =
+          t?.lastQueue?.name ||
+          t?.firstQueueName ||
+          "";
+
+        return allowedQueues.includes(queueName);
+      });
 
     const connectedTasks = teamTasks.filter(
       t => String(t.status).toLowerCase() === "connected"
@@ -507,6 +523,9 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
       entryPointId: ENTRY_POINT_ID,
       teamId: userTeamId,
       generatedAt: new Date().toISOString(),
+
+      // Dynamically detected queues for current team
+      allowedQueues,
 
       queue: {
         callsInQueue: waitingTasks.length,
