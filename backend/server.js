@@ -118,17 +118,10 @@ function verifySession(token) {
   return stored;
 }
 
-function getSessionFromRequest(req) {
-  const auth = req.headers.authorization || "";
-  const bearerToken = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  const queryToken = typeof req.query?.token === "string" ? req.query.token : "";
-  const token = bearerToken || queryToken;
-
-  return verifySession(token);
-}
-
 function requireSession(req, res, next) {
-  const session = getSessionFromRequest(req);
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const session = verifySession(token);
 
   if (!session) {
     return res.status(401).json({
@@ -451,10 +444,13 @@ app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res
 });
 
 
-const QUEUE_CONFIG_CACHE_TTL_MS = Number(process.env.QUEUE_CONFIG_CACHE_TTL_MS || 30000);
 
-let queueConfigCache = {
+const ACCESS_CONFIG_CACHE_TTL_MS = Number(process.env.ACCESS_CONFIG_CACHE_TTL_MS || 30000);
+
+let accessConfigCache = {
   updatedAt: 0,
+  users: [],
+  userProfiles: [],
   queues: [],
   error: null,
   updating: null
@@ -468,33 +464,39 @@ function asArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function extractArray(payload, keys = []) {
+  if (Array.isArray(payload)) return payload;
+
+  for (const key of keys) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+  }
+
+  const defaultKeys = [
+    "data",
+    "items",
+    "content",
+    "response",
+    "users",
+    "userProfiles",
+    "profiles",
+    "queues",
+    "contactServiceQueues",
+    "contactServiceQueue"
+  ];
+
+  for (const key of defaultKeys) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+  }
+
+  return [];
+}
+
 function getQueueNameFromTask(task) {
   return (
     task?.lastQueue?.name ||
     task?.firstQueueName ||
     ""
   );
-}
-
-function extractQueueList(payload) {
-  if (Array.isArray(payload)) return payload;
-
-  const candidates = [
-    payload?.data,
-    payload?.items,
-    payload?.queues,
-    payload?.contactServiceQueues,
-    payload?.contactServiceQueue,
-    payload?.csqs,
-    payload?.content,
-    payload?.response
-  ];
-
-  for (const candidate of candidates) {
-    if (Array.isArray(candidate)) return candidate;
-  }
-
-  return [];
 }
 
 function normalizeQueue(queue) {
@@ -507,34 +509,19 @@ function normalizeQueue(queue) {
       queue?.displayName ||
       ""
     ),
+    channelType: String(queue?.channelType || ""),
+    active: queue?.active !== false,
     raw: queue
   };
 }
 
-function queueTeamMatches(queue, userTeamId) {
-  const teamId = String(userTeamId || "");
-  if (!teamId) return false;
+function isVoiceQueue(queue) {
+  const channelType = normalizeText(queue?.channelType || queue?.raw?.channelType || "");
 
-  const teams = [
-    ...asArray(queue?.teams),
-    ...asArray(queue?.team),
-    ...asArray(queue?.assignedTeams),
-    ...asArray(queue?.teamList),
-    ...asArray(queue?.teamDetails)
-  ];
-
-  if (teams.some(t => String(t?.id || t?.teamId || t?.uuid || t) === teamId)) {
-    return true;
-  }
-
-  const teamIds = [
-    ...asArray(queue?.teamIds),
-    ...asArray(queue?.teamIdList),
-    ...asArray(queue?.assignedTeamIds),
-    ...asArray(queue?.teamId)
-  ];
-
-  return teamIds.some(id => String(id) === teamId);
+  return (
+    channelType === "telephony" ||
+    channelType === "voice"
+  );
 }
 
 async function fetchConfigJson(path) {
@@ -556,104 +543,236 @@ async function fetchConfigJson(path) {
   return text ? JSON.parse(text) : {};
 }
 
-function getQueueConfigEndpoints() {
-  const fromEnv = String(process.env.WXCC_QUEUE_CONFIG_ENDPOINTS || "")
-    .split(",")
-    .map(v => v.trim())
-    .filter(Boolean);
+async function fetchAllAccessConfig() {
+  const [usersPayload, profilesPayload, queuesPayload] = await Promise.all([
+    fetchConfigJson(`/organization/${WEBEX_ORG_ID}/user`),
+    fetchConfigJson(`/organization/${WEBEX_ORG_ID}/user-profile`),
+    fetchConfigJson(`/organization/${WEBEX_ORG_ID}/contact-service-queue`)
+  ]);
 
-  if (fromEnv.length) return fromEnv;
+  const users = extractArray(usersPayload, ["users"]).filter(Boolean);
+  const userProfiles = extractArray(profilesPayload, ["userProfiles", "profiles"]).filter(Boolean);
+  const queues = extractArray(queuesPayload, ["contactServiceQueues", "queues", "contactServiceQueue"])
+    .map(normalizeQueue)
+    .filter(q => q.id || q.name);
 
-  return [
-    `/organization/${WEBEX_ORG_ID}/contact-service-queue`,
-    `/organization/${WEBEX_ORG_ID}/contact-service-queues`,
-    `/organization/${WEBEX_ORG_ID}/queue`,
-    `/organization/${WEBEX_ORG_ID}/queues`
-  ];
+  return {
+    users,
+    userProfiles,
+    queues
+  };
 }
 
-async function fetchAllQueueConfigs() {
-  const errors = [];
-
-  for (const endpoint of getQueueConfigEndpoints()) {
-    try {
-      const data = await fetchConfigJson(endpoint);
-      const queueList = extractQueueList(data);
-
-      if (queueList.length) {
-        return queueList.map(normalizeQueue).filter(q => q.id || q.name);
-      }
-
-      errors.push(`${endpoint}: no queue array found`);
-    } catch (err) {
-      errors.push(err.message);
-    }
-  }
-
-  throw new Error(`Could not load WXCC queue configuration. Tried: ${errors.join(" | ")}`);
-}
-
-async function getQueueConfig(force = false) {
+async function getAccessConfig(force = false) {
   const now = Date.now();
 
   if (
     !force &&
-    queueConfigCache.updatedAt &&
-    now - queueConfigCache.updatedAt < QUEUE_CONFIG_CACHE_TTL_MS
+    accessConfigCache.updatedAt &&
+    now - accessConfigCache.updatedAt < ACCESS_CONFIG_CACHE_TTL_MS
   ) {
-    return queueConfigCache;
+    return accessConfigCache;
   }
 
-  if (queueConfigCache.updating) {
-    return queueConfigCache.updating;
+  if (accessConfigCache.updating) {
+    return accessConfigCache.updating;
   }
 
-  queueConfigCache.updating = fetchAllQueueConfigs()
-    .then(queues => {
-      queueConfigCache.queues = queues;
-      queueConfigCache.updatedAt = Date.now();
-      queueConfigCache.error = null;
-      return queueConfigCache;
+  accessConfigCache.updating = fetchAllAccessConfig()
+    .then(data => {
+      accessConfigCache.users = data.users;
+      accessConfigCache.userProfiles = data.userProfiles;
+      accessConfigCache.queues = data.queues;
+      accessConfigCache.updatedAt = Date.now();
+      accessConfigCache.error = null;
+      return accessConfigCache;
     })
     .catch(err => {
-      queueConfigCache.queues = [];
-      queueConfigCache.updatedAt = Date.now();
-      queueConfigCache.error = err;
-      return queueConfigCache;
+      accessConfigCache.error = err;
+      accessConfigCache.updatedAt = Date.now();
+      return accessConfigCache;
     })
     .finally(() => {
-      queueConfigCache.updating = null;
+      accessConfigCache.updating = null;
     });
 
-  return queueConfigCache.updating;
+  return accessConfigCache.updating;
 }
 
-async function getAllowedQueuesForTeam(userTeamId) {
-  const cache = await getQueueConfig(false);
+function findCurrentContactCenterUser(users, sessionUser) {
+  const userId = String(sessionUser?.userId || "");
+  const email = normalizeText(sessionUser?.email || "");
 
-  const allowed = cache.queues
-    .filter(q => queueTeamMatches(q.raw, userTeamId))
+  return users.find(user =>
+    String(user?.ciUserId || "") === userId ||
+    String(user?.id || "") === userId ||
+    (email && normalizeText(user?.email || "") === email)
+  ) || null;
+}
+
+function findUserProfile(userProfiles, profileId) {
+  const id = String(profileId || "");
+  return userProfiles.find(profile => String(profile?.id || "") === id) || null;
+}
+
+function collectQueueRefs(value, refs = []) {
+  if (!value) return refs;
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectQueueRefs(item, refs));
+    return refs;
+  }
+
+  if (typeof value !== "object") return refs;
+
+  for (const [key, child] of Object.entries(value)) {
+    const normalizedKey = key.toLowerCase();
+
+    if (
+      normalizedKey === "queues" ||
+      normalizedKey === "queue" ||
+      normalizedKey === "queueids" ||
+      normalizedKey === "queueidlist" ||
+      normalizedKey === "selectedqueues" ||
+      normalizedKey === "selectedqueueids"
+    ) {
+      const items = Array.isArray(child) ? child : [child];
+
+      items.forEach(item => {
+        if (!item) return;
+
+        if (typeof item === "string") {
+          refs.push({ id: item, name: item });
+          return;
+        }
+
+        if (typeof item === "object") {
+          refs.push({
+            id: String(item.id || item.queueId || item.csqId || item.uuid || ""),
+            name: String(item.name || item.queueName || item.csqName || item.displayName || "")
+          });
+        }
+      });
+    }
+
+    if (typeof child === "object") {
+      collectQueueRefs(child, refs);
+    }
+  }
+
+  return refs;
+}
+
+function resolveQueueRefsToNames(queueRefs, queues) {
+  const names = new Set();
+
+  queueRefs.forEach(ref => {
+    const id = String(ref.id || "");
+    const name = String(ref.name || "");
+
+    const match = queues.find(queue =>
+      (id && queue.id === id) ||
+      (name && normalizeText(queue.name) === normalizeText(name))
+    );
+
+    if (match?.name) {
+      names.add(match.name);
+    } else if (name) {
+      names.add(name);
+    }
+  });
+
+  return [...names];
+}
+
+function getAllTelephonyQueueNames(queues) {
+  return queues
+    .filter(q => q.active)
+    .filter(isVoiceQueue)
     .map(q => q.name)
     .filter(Boolean);
+}
 
-  return Array.from(new Set(allowed));
+async function getAllowedQueuesForSession(session) {
+  const config = await getAccessConfig(false);
+
+  if (config.error) {
+    return {
+      allowedQueues: [],
+      source: "user-profile",
+      error: config.error.message,
+      user: null,
+      profile: null
+    };
+  }
+
+  const currentUser = findCurrentContactCenterUser(config.users, session?.user || {});
+  const profile = findUserProfile(config.userProfiles, currentUser?.userProfileId);
+
+  if (!currentUser) {
+    return {
+      allowedQueues: [],
+      source: "user-profile",
+      error: `No contact center user found for session userId ${session?.user?.userId || ""}`,
+      user: null,
+      profile: null
+    };
+  }
+
+  if (!profile) {
+    return {
+      allowedQueues: [],
+      source: "user-profile",
+      error: `No user profile found for profileId ${currentUser.userProfileId || ""}`,
+      user: currentUser,
+      profile: null
+    };
+  }
+
+  const accessAllQueues = String(profile.accessAllQueues || "").toUpperCase();
+
+  if (accessAllQueues === "ALL") {
+    return {
+      allowedQueues: getAllTelephonyQueueNames(config.queues),
+      source: "user-profile:all-queues",
+      error: null,
+      user: currentUser,
+      profile
+    };
+  }
+
+  const queueRefs = collectQueueRefs(profile);
+  const profileQueueNames = resolveQueueRefsToNames(queueRefs, config.queues);
+  const voiceQueueNames = new Set(getAllTelephonyQueueNames(config.queues));
+  const allowedQueues = profileQueueNames.filter(name => voiceQueueNames.has(name));
+
+  return {
+    allowedQueues,
+    source: "user-profile:selected-voice-queues",
+    error: allowedQueues.length ? null : "User profile contains no readable selected voice queue references",
+    user: currentUser,
+    profile
+  };
 }
 
 function queueNameAllowed(queueName, allowedQueues) {
   const normalizedQueue = normalizeText(queueName);
   if (!normalizedQueue) return false;
+
   return allowedQueues.some(q => normalizeText(q) === normalizedQueue);
 }
 
 app.get("/api/wallboard", requireSession, async (req, res) => {
   try {
-    const userTeamId = req.session?.user?.teamId || "";
+    const access = await getAllowedQueuesForSession(req.session);
+    const allowedQueues = access.allowedQueues || [];
 
-    const [allAgents, allTasks, allowedQueues] = await Promise.all([
+    const [allAgents, allTasks] = await Promise.all([
       getAgentSessions(),
-      getTaskDetails(),
-      getAllowedQueuesForTeam(userTeamId)
+      getTaskDetails()
     ]);
+
+    const userTeamId = req.session?.user?.teamId || "";
 
     const agents = allAgents
       .filter(a => a.isActive === true)
@@ -707,12 +826,14 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
     res.json({
       ok: true,
       source: "webex-search-api",
-      queueSource: "wxcc-config-api",
+      queueSource: access.source,
+      queueAccessError: access.error,
+      userProfileId: access.user?.userProfileId || null,
+      userProfileName: access.profile?.name || null,
       entryPointId: ENTRY_POINT_ID,
       teamId: userTeamId,
       generatedAt: new Date().toISOString(),
       allowedQueues,
-      queueConfigError: queueConfigCache.error?.message || null,
 
       queue: {
         callsInQueue: waitingTasks.length,
@@ -777,34 +898,33 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
   }
 });
 
-app.get("/api/debug/queues", requireSession, async (req, res) => {
+app.get("/api/debug/profile-queues", requireSession, async (req, res) => {
   try {
-    const userTeamId = req.session?.user?.teamId || "";
-    const cache = await getQueueConfig(true);
-    const allowedQueues = await getAllowedQueuesForTeam(userTeamId);
+    const access = await getAllowedQueuesForSession(req.session);
+    const config = await getAccessConfig(false);
 
     res.json({
       ok: true,
-      teamId: userTeamId,
-      allowedQueues,
-      queueConfigError: queueConfigCache.error?.message || null,
-      queueCount: cache.queues.length,
-      queues: cache.queues.map(q => ({
-        id: q.id,
-        name: q.name,
-        matchesCurrentTeam: queueTeamMatches(q.raw, userTeamId),
-        rawTeamFields: {
-          teams: q.raw?.teams,
-          team: q.raw?.team,
-          assignedTeams: q.raw?.assignedTeams,
-          teamList: q.raw?.teamList,
-          teamDetails: q.raw?.teamDetails,
-          teamIds: q.raw?.teamIds,
-          teamIdList: q.raw?.teamIdList,
-          assignedTeamIds: q.raw?.assignedTeamIds,
-          teamId: q.raw?.teamId
-        }
-      }))
+      sessionUser: req.session?.user || {},
+      queueSource: access.source,
+      queueAccessError: access.error,
+      allowedQueues: access.allowedQueues,
+      contactCenterUser: access.user ? {
+        id: access.user.id,
+        ciUserId: access.user.ciUserId,
+        email: access.user.email,
+        userProfileId: access.user.userProfileId,
+        teamIds: access.user.teamIds
+      } : null,
+      userProfile: access.profile ? {
+        id: access.profile.id,
+        name: access.profile.name,
+        profileType: access.profile.profileType,
+        accessAllQueues: access.profile.accessAllQueues,
+        queues: access.profile.queues,
+        rawQueueRefsFound: collectQueueRefs(access.profile)
+      } : null,
+      allVoiceQueues: getAllTelephonyQueueNames(config.queues)
     });
   } catch (err) {
     res.status(500).json({
@@ -813,200 +933,6 @@ app.get("/api/debug/queues", requireSession, async (req, res) => {
     });
   }
 });
-
-
-
-function redactForDebug(value, depth = 0) {
-  if (depth > 6) return "[MaxDepth]";
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 20).map(item => redactForDebug(item, depth + 1));
-  }
-
-  if (value && typeof value === "object") {
-    const result = {};
-
-    for (const [key, val] of Object.entries(value)) {
-      const lowerKey = key.toLowerCase();
-
-      if (
-        lowerKey.includes("token") ||
-        lowerKey.includes("secret") ||
-        lowerKey.includes("password") ||
-        lowerKey.includes("authorization")
-      ) {
-        result[key] = "[REDACTED]";
-      } else {
-        result[key] = redactForDebug(val, depth + 1);
-      }
-    }
-
-    return result;
-  }
-
-  return value;
-}
-
-function summarizePayload(payload) {
-  const isArray = Array.isArray(payload);
-  const root = isArray ? payload : (payload && typeof payload === "object" ? payload : {});
-  const keys = payload && typeof payload === "object" ? Object.keys(payload) : [];
-
-  const arrays = [];
-
-  if (payload && typeof payload === "object") {
-    for (const [key, value] of Object.entries(payload)) {
-      if (Array.isArray(value)) {
-        arrays.push({
-          key,
-          length: value.length,
-          sample: redactForDebug(value.slice(0, 3))
-        });
-      }
-    }
-  }
-
-  return {
-    type: isArray ? "array" : typeof payload,
-    keys,
-    arrayLength: isArray ? payload.length : undefined,
-    arrays,
-    sample: redactForDebug(isArray ? payload.slice(0, 5) : root)
-  };
-}
-
-async function fetchConfigRaw(path) {
-  const token = await getValidServiceToken();
-
-  const response = await fetch(`${WEBEX_BASE_URL}${path}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json"
-    }
-  });
-
-  const text = await response.text();
-
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
-
-  return {
-    path,
-    status: response.status,
-    ok: response.ok,
-    contentType: response.headers.get("content-type") || "",
-    text: json ? undefined : text.slice(0, 2000),
-    json
-  };
-}
-
-function getAccessDiscoveryEndpoints(user) {
-  const userId = encodeURIComponent(user?.userId || "");
-  const email = encodeURIComponent(user?.email || "");
-  const configured = String(process.env.WXCC_ACCESS_DISCOVERY_ENDPOINTS || "")
-    .split(",")
-    .map(v => v.trim())
-    .filter(Boolean);
-
-  if (configured.length) return configured;
-
-  const candidates = [
-    `/organization/${WEBEX_ORG_ID}/user-profile`,
-    `/organization/${WEBEX_ORG_ID}/user-profiles`,
-    `/organization/${WEBEX_ORG_ID}/access-profile`,
-    `/organization/${WEBEX_ORG_ID}/access-profiles`,
-    `/organization/${WEBEX_ORG_ID}/resource-collection`,
-    `/organization/${WEBEX_ORG_ID}/resource-collections`,
-    `/organization/${WEBEX_ORG_ID}/contact-center-user`,
-    `/organization/${WEBEX_ORG_ID}/contact-center-users`,
-    `/organization/${WEBEX_ORG_ID}/user`,
-    `/organization/${WEBEX_ORG_ID}/users`,
-    `/organization/${WEBEX_ORG_ID}/queue`,
-    `/organization/${WEBEX_ORG_ID}/queues`,
-    `/organization/${WEBEX_ORG_ID}/contact-service-queue`,
-    `/organization/${WEBEX_ORG_ID}/contact-service-queues`
-  ];
-
-  if (userId) {
-    candidates.push(
-      `/organization/${WEBEX_ORG_ID}/contact-center-user/${userId}`,
-      `/organization/${WEBEX_ORG_ID}/contact-center-users/${userId}`,
-      `/organization/${WEBEX_ORG_ID}/user/${userId}`,
-      `/organization/${WEBEX_ORG_ID}/users/${userId}`,
-      `/organization/${WEBEX_ORG_ID}/user-profile/${userId}`,
-      `/organization/${WEBEX_ORG_ID}/access-profile/${userId}`
-    );
-  }
-
-  if (email) {
-    candidates.push(
-      `/organization/${WEBEX_ORG_ID}/contact-center-user?email=${email}`,
-      `/organization/${WEBEX_ORG_ID}/contact-center-users?email=${email}`,
-      `/organization/${WEBEX_ORG_ID}/users?email=${email}`
-    );
-  }
-
-  return candidates;
-}
-
-app.get("/api/debug/access-discovery", requireSession, async (req, res) => {
-  const user = req.session?.user || {};
-  const raw = String(req.query?.raw || "") === "1";
-  const endpoints = getAccessDiscoveryEndpoints(user);
-  const results = [];
-
-  for (const endpoint of endpoints) {
-    try {
-      const result = await fetchConfigRaw(endpoint);
-
-      results.push({
-        path: result.path,
-        status: result.status,
-        ok: result.ok,
-        contentType: result.contentType,
-        ...(result.ok && result.json
-          ? { summary: summarizePayload(result.json), raw: raw ? redactForDebug(result.json) : undefined }
-          : { errorText: result.text })
-      });
-    } catch (err) {
-      results.push({
-        path: endpoint,
-        ok: false,
-        error: err.message
-      });
-    }
-  }
-
-  res.json({
-    ok: true,
-    purpose: "Discover WXCC user profile, access profile, resource collection and queue config endpoints",
-    user: {
-      email: user.email || "",
-      userId: user.userId || "",
-      teamId: user.teamId || "",
-      displayName: user.displayName || ""
-    },
-    raw,
-    endpointCount: results.length,
-    results
-  });
-});
-
-app.get("/api/debug/session", requireSession, (req, res) => {
-  res.json({
-    ok: true,
-    session: {
-      role: req.session.role,
-      user: req.session.user,
-      expiresAt: req.session.expiresAt
-    }
-  });
-});
-
 
 app.listen(PORT, () => {
   console.log(`Secure widget backend listening on ${PORT}`);
