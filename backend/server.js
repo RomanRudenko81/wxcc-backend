@@ -118,10 +118,17 @@ function verifySession(token) {
   return stored;
 }
 
-function requireSession(req, res, next) {
+function getSessionFromRequest(req) {
   const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  const session = verifySession(token);
+  const bearerToken = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const queryToken = typeof req.query?.token === "string" ? req.query.token : "";
+  const token = bearerToken || queryToken;
+
+  return verifySession(token);
+}
+
+function requireSession(req, res, next) {
+  const session = getSessionFromRequest(req);
 
   if (!session) {
     return res.status(401).json({
@@ -762,134 +769,193 @@ function queueNameAllowed(queueName, allowedQueues) {
   return allowedQueues.some(q => normalizeText(q) === normalizedQueue);
 }
 
+
+const WALLBOARD_DATA_CACHE_TTL_MS = Number(process.env.WALLBOARD_DATA_CACHE_TTL_MS || 5000);
+const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
+
+let wallboardDataCache = {
+  updatedAt: 0,
+  allAgents: [],
+  allTasks: [],
+  updating: null,
+  error: null
+};
+
+async function getWallboardSourceData(force = false) {
+  const now = Date.now();
+
+  if (
+    !force &&
+    wallboardDataCache.updatedAt &&
+    now - wallboardDataCache.updatedAt < WALLBOARD_DATA_CACHE_TTL_MS
+  ) {
+    return wallboardDataCache;
+  }
+
+  if (wallboardDataCache.updating) {
+    return wallboardDataCache.updating;
+  }
+
+  wallboardDataCache.updating = Promise.all([
+    getAgentSessions(),
+    getTaskDetails()
+  ])
+    .then(([allAgents, allTasks]) => {
+      wallboardDataCache.allAgents = allAgents;
+      wallboardDataCache.allTasks = allTasks;
+      wallboardDataCache.updatedAt = Date.now();
+      wallboardDataCache.error = null;
+      return wallboardDataCache;
+    })
+    .catch(err => {
+      wallboardDataCache.error = err;
+      throw err;
+    })
+    .finally(() => {
+      wallboardDataCache.updating = null;
+    });
+
+  return wallboardDataCache.updating;
+}
+
+async function buildWallboardPayload(session, forceRefresh = false) {
+  const access = await getAllowedQueuesForSession(session);
+  const allowedQueues = access.allowedQueues || [];
+  const sourceData = await getWallboardSourceData(forceRefresh);
+
+  const allAgents = sourceData.allAgents || [];
+  const allTasks = sourceData.allTasks || [];
+
+  const userTeamId = session?.user?.teamId || "";
+
+  const agents = allAgents
+    .filter(a => a.isActive === true)
+    .filter(a => a.teamId === userTeamId);
+
+  const telephonyTasks = allTasks
+    .filter(t => String(t.channelType).toLowerCase() === "telephony");
+
+  const allowedQueueTasks = telephonyTasks
+    .filter(t => queueNameAllowed(getQueueNameFromTask(t), allowedQueues));
+
+  const waitingTasks = allowedQueueTasks
+    .filter(t => t?.isActive === true)
+    .filter(t => ["new", "parked"].includes(String(t.status).toLowerCase()));
+
+  const connectedTasks = allowedQueueTasks.filter(
+    t => String(t.status).toLowerCase() === "connected"
+  );
+
+  const avgWaitSeconds =
+    allowedQueueTasks.length > 0
+      ? Math.round(
+          allowedQueueTasks.reduce((sum, t) => sum + Number(t.queueDuration || 0), 0) /
+            allowedQueueTasks.length /
+            1000
+        )
+      : 0;
+
+  const avgHandleSeconds =
+    allowedQueueTasks.length > 0
+      ? Math.round(
+          allowedQueueTasks.reduce((sum, t) => sum + Number(t.connectedDuration || 0), 0) /
+            allowedQueueTasks.length /
+            1000
+        )
+      : 0;
+
+  const longestWaitingSeconds =
+    waitingTasks.length > 0
+      ? Math.max(
+          ...waitingTasks.map(t =>
+            Math.floor((Date.now() - Number(t.createdTime || 0)) / 1000)
+          )
+        )
+      : 0;
+
+  const availableAgents = agents.filter(a =>
+    String(getDisplayState(a)).toLowerCase() === "available"
+  );
+
+  return {
+    ok: true,
+    source: "webex-search-api",
+    delivery: "sse-ready",
+    queueSource: access.source,
+    queueAccessError: access.error,
+    userProfileId: access.user?.userProfileId || null,
+    userProfileName: access.profile?.name || null,
+    entryPointId: ENTRY_POINT_ID,
+    teamId: userTeamId,
+    generatedAt: new Date().toISOString(),
+    allowedQueues,
+
+    queue: {
+      callsInQueue: waitingTasks.length,
+      activeCalls: connectedTasks.length,
+      longestWaitingSeconds,
+      avgWaitSeconds,
+      avgHandleSeconds
+    },
+
+    agents: {
+      loggedIn: agents.length,
+      available: availableAgents.length
+    },
+
+    agentList: agents.map(agent => {
+      const channel = getPrimaryChannelInfo(agent);
+
+      return {
+        name: agent.agentName || "",
+        login: agent.userLoginId || "",
+        state: getDisplayState(agent),
+        currentState: channel?.currentState || "",
+        idleCodeName: channel?.idleCodeName || "",
+        teamId: agent.teamId || "",
+        team: agent.teamName || "",
+        site: agent.siteName || "",
+        startTime: agent.startTime || null,
+        lastActivityTime: channel?.lastActivityTime || null
+      };
+    }),
+
+    taskList: connectedTasks.map(task => ({
+      id: task.id,
+      status: task.status,
+      caller: task.origin || "",
+      queue: task?.lastQueue?.name || "",
+      firstQueue: task?.firstQueueName || "",
+      entryPoint: task?.lastEntryPoint?.name || "",
+      agent: task?.lastAgent?.name || "",
+      queueDuration: task.queueDuration || 0,
+      connectedDuration: task.connectedDuration || 0
+    })),
+
+    waitingTaskList: waitingTasks.map(task => ({
+      id: task.id,
+      status: task.status,
+      caller: task.origin || "",
+      queue: task?.lastQueue?.name || "",
+      firstQueue: task?.firstQueueName || "",
+      entryPoint: task?.lastEntryPoint?.name || "",
+      createdTime: task.createdTime || null,
+      waitingSeconds: task.createdTime
+        ? Math.floor((Date.now() - Number(task.createdTime)) / 1000)
+        : 0
+    }))
+  };
+}
+
+function writeSseEvent(res, eventName, payload) {
+  res.write(`event: ${eventName}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
 app.get("/api/wallboard", requireSession, async (req, res) => {
   try {
-    const access = await getAllowedQueuesForSession(req.session);
-    const allowedQueues = access.allowedQueues || [];
-
-    const [allAgents, allTasks] = await Promise.all([
-      getAgentSessions(),
-      getTaskDetails()
-    ]);
-
-    const userTeamId = req.session?.user?.teamId || "";
-
-    const agents = allAgents
-      .filter(a => a.isActive === true)
-      .filter(a => a.teamId === userTeamId);
-
-    const telephonyTasks = allTasks
-      .filter(t => String(t.channelType).toLowerCase() === "telephony");
-
-    const allowedQueueTasks = telephonyTasks
-      .filter(t => queueNameAllowed(getQueueNameFromTask(t), allowedQueues));
-
-    const waitingTasks = allowedQueueTasks
-      .filter(t => t?.isActive === true)
-      .filter(t => ["new", "parked"].includes(String(t.status).toLowerCase()));
-
-    const connectedTasks = allowedQueueTasks.filter(
-      t => String(t.status).toLowerCase() === "connected"
-    );
-
-    const avgWaitSeconds =
-      allowedQueueTasks.length > 0
-        ? Math.round(
-            allowedQueueTasks.reduce((sum, t) => sum + Number(t.queueDuration || 0), 0) /
-              allowedQueueTasks.length /
-              1000
-          )
-        : 0;
-
-    const avgHandleSeconds =
-      allowedQueueTasks.length > 0
-        ? Math.round(
-            allowedQueueTasks.reduce((sum, t) => sum + Number(t.connectedDuration || 0), 0) /
-              allowedQueueTasks.length /
-              1000
-          )
-        : 0;
-
-    const longestWaitingSeconds =
-      waitingTasks.length > 0
-        ? Math.max(
-            ...waitingTasks.map(t =>
-              Math.floor((Date.now() - Number(t.createdTime || 0)) / 1000)
-            )
-          )
-        : 0;
-
-    const availableAgents = agents.filter(a =>
-      String(getDisplayState(a)).toLowerCase() === "available"
-    );
-
-    res.json({
-      ok: true,
-      source: "webex-search-api",
-      queueSource: access.source,
-      queueAccessError: access.error,
-      userProfileId: access.user?.userProfileId || null,
-      userProfileName: access.profile?.name || null,
-      entryPointId: ENTRY_POINT_ID,
-      teamId: userTeamId,
-      generatedAt: new Date().toISOString(),
-      allowedQueues,
-
-      queue: {
-        callsInQueue: waitingTasks.length,
-        activeCalls: connectedTasks.length,
-        longestWaitingSeconds,
-        avgWaitSeconds,
-        avgHandleSeconds
-      },
-
-      agents: {
-        loggedIn: agents.length,
-        available: availableAgents.length
-      },
-
-      agentList: agents.map(agent => {
-        const channel = getPrimaryChannelInfo(agent);
-
-        return {
-          name: agent.agentName || "",
-          login: agent.userLoginId || "",
-          state: getDisplayState(agent),
-          currentState: channel?.currentState || "",
-          idleCodeName: channel?.idleCodeName || "",
-          teamId: agent.teamId || "",
-          team: agent.teamName || "",
-          site: agent.siteName || "",
-          startTime: agent.startTime || null,
-          lastActivityTime: channel?.lastActivityTime || null
-        };
-      }),
-
-      taskList: connectedTasks.map(task => ({
-        id: task.id,
-        status: task.status,
-        caller: task.origin || "",
-        queue: task?.lastQueue?.name || "",
-        firstQueue: task?.firstQueueName || "",
-        entryPoint: task?.lastEntryPoint?.name || "",
-        agent: task?.lastAgent?.name || "",
-        queueDuration: task.queueDuration || 0,
-        connectedDuration: task.connectedDuration || 0
-      })),
-
-      waitingTaskList: waitingTasks.map(task => ({
-        id: task.id,
-        status: task.status,
-        caller: task.origin || "",
-        queue: task?.lastQueue?.name || "",
-        firstQueue: task?.firstQueueName || "",
-        entryPoint: task?.lastEntryPoint?.name || "",
-        createdTime: task.createdTime || null,
-        waitingSeconds: task.createdTime
-          ? Math.floor((Date.now() - Number(task.createdTime)) / 1000)
-          : 0
-      }))
-    });
+    const payload = await buildWallboardPayload(req.session, false);
+    res.json(payload);
   } catch (err) {
     res.status(500).json({
       ok: false,
@@ -897,6 +963,76 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
     });
   }
 });
+
+app.get("/api/wallboard/stream", async (req, res) => {
+  const session = getSessionFromRequest(req);
+
+  if (!session) {
+    return res.status(401).json({
+      error: "Invalid or expired session"
+    });
+  }
+
+  req.session = session;
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+
+  if (typeof res.flushHeaders === "function") {
+    res.flushHeaders();
+  }
+
+  let closed = false;
+  let lastPayload = "";
+
+  const sendUpdate = async (force = false) => {
+    if (closed) return;
+
+    try {
+      const payload = await buildWallboardPayload(req.session, force);
+      const serialized = JSON.stringify(payload);
+
+      if (serialized !== lastPayload || force) {
+        lastPayload = serialized;
+        writeSseEvent(res, "wallboard", payload);
+      }
+    } catch (err) {
+      writeSseEvent(res, "error", {
+        ok: false,
+        error: err.message
+      });
+    }
+  };
+
+  writeSseEvent(res, "ready", {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    refreshMs: WALLBOARD_DATA_CACHE_TTL_MS
+  });
+
+  await sendUpdate(true);
+
+  const updateTimer = setInterval(() => {
+    sendUpdate(false);
+  }, WALLBOARD_DATA_CACHE_TTL_MS);
+
+  const heartbeatTimer = setInterval(() => {
+    if (!closed) {
+      res.write(`: heartbeat ${Date.now()}\n\n`);
+    }
+  }, SSE_HEARTBEAT_MS);
+
+  req.on("close", () => {
+    closed = true;
+    clearInterval(updateTimer);
+    clearInterval(heartbeatTimer);
+  });
+});
+
 
 app.get("/api/debug/profile-queues", requireSession, async (req, res) => {
   try {
