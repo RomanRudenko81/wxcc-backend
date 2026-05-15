@@ -443,63 +443,243 @@ app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res
   }
 });
 
+
+const QUEUE_CONFIG_CACHE_TTL_MS = Number(process.env.QUEUE_CONFIG_CACHE_TTL_MS || 30000);
+
+let queueConfigCache = {
+  updatedAt: 0,
+  queues: [],
+  error: null,
+  updating: null
+};
+
+function normalizeText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function getQueueNameFromTask(task) {
+  return (
+    task?.lastQueue?.name ||
+    task?.firstQueueName ||
+    ""
+  );
+}
+
+function extractQueueList(payload) {
+  if (Array.isArray(payload)) return payload;
+
+  const candidates = [
+    payload?.data,
+    payload?.items,
+    payload?.queues,
+    payload?.contactServiceQueues,
+    payload?.contactServiceQueue,
+    payload?.csqs,
+    payload?.content,
+    payload?.response
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+
+  return [];
+}
+
+function normalizeQueue(queue) {
+  return {
+    id: String(queue?.id || queue?.queueId || queue?.csqId || queue?.uuid || ""),
+    name: String(
+      queue?.name ||
+      queue?.queueName ||
+      queue?.csqName ||
+      queue?.displayName ||
+      ""
+    ),
+    raw: queue
+  };
+}
+
+function queueTeamMatches(queue, userTeamId) {
+  const teamId = String(userTeamId || "");
+  if (!teamId) return false;
+
+  const teams = [
+    ...asArray(queue?.teams),
+    ...asArray(queue?.team),
+    ...asArray(queue?.assignedTeams),
+    ...asArray(queue?.teamList),
+    ...asArray(queue?.teamDetails)
+  ];
+
+  if (teams.some(t => String(t?.id || t?.teamId || t?.uuid || t) === teamId)) {
+    return true;
+  }
+
+  const teamIds = [
+    ...asArray(queue?.teamIds),
+    ...asArray(queue?.teamIdList),
+    ...asArray(queue?.assignedTeamIds),
+    ...asArray(queue?.teamId)
+  ];
+
+  return teamIds.some(id => String(id) === teamId);
+}
+
+async function fetchConfigJson(path) {
+  const token = await getValidServiceToken();
+
+  const response = await fetch(`${WEBEX_BASE_URL}${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json"
+    }
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`GET ${path} failed with HTTP ${response.status}: ${text}`);
+  }
+
+  return text ? JSON.parse(text) : {};
+}
+
+function getQueueConfigEndpoints() {
+  const fromEnv = String(process.env.WXCC_QUEUE_CONFIG_ENDPOINTS || "")
+    .split(",")
+    .map(v => v.trim())
+    .filter(Boolean);
+
+  if (fromEnv.length) return fromEnv;
+
+  return [
+    `/organization/${WEBEX_ORG_ID}/contact-service-queue`,
+    `/organization/${WEBEX_ORG_ID}/contact-service-queues`,
+    `/organization/${WEBEX_ORG_ID}/queue`,
+    `/organization/${WEBEX_ORG_ID}/queues`
+  ];
+}
+
+async function fetchAllQueueConfigs() {
+  const errors = [];
+
+  for (const endpoint of getQueueConfigEndpoints()) {
+    try {
+      const data = await fetchConfigJson(endpoint);
+      const queueList = extractQueueList(data);
+
+      if (queueList.length) {
+        return queueList.map(normalizeQueue).filter(q => q.id || q.name);
+      }
+
+      errors.push(`${endpoint}: no queue array found`);
+    } catch (err) {
+      errors.push(err.message);
+    }
+  }
+
+  throw new Error(`Could not load WXCC queue configuration. Tried: ${errors.join(" | ")}`);
+}
+
+async function getQueueConfig(force = false) {
+  const now = Date.now();
+
+  if (
+    !force &&
+    queueConfigCache.updatedAt &&
+    now - queueConfigCache.updatedAt < QUEUE_CONFIG_CACHE_TTL_MS
+  ) {
+    return queueConfigCache;
+  }
+
+  if (queueConfigCache.updating) {
+    return queueConfigCache.updating;
+  }
+
+  queueConfigCache.updating = fetchAllQueueConfigs()
+    .then(queues => {
+      queueConfigCache.queues = queues;
+      queueConfigCache.updatedAt = Date.now();
+      queueConfigCache.error = null;
+      return queueConfigCache;
+    })
+    .catch(err => {
+      queueConfigCache.queues = [];
+      queueConfigCache.updatedAt = Date.now();
+      queueConfigCache.error = err;
+      return queueConfigCache;
+    })
+    .finally(() => {
+      queueConfigCache.updating = null;
+    });
+
+  return queueConfigCache.updating;
+}
+
+async function getAllowedQueuesForTeam(userTeamId) {
+  const cache = await getQueueConfig(false);
+
+  const allowed = cache.queues
+    .filter(q => queueTeamMatches(q.raw, userTeamId))
+    .map(q => q.name)
+    .filter(Boolean);
+
+  return Array.from(new Set(allowed));
+}
+
+function queueNameAllowed(queueName, allowedQueues) {
+  const normalizedQueue = normalizeText(queueName);
+  if (!normalizedQueue) return false;
+  return allowedQueues.some(q => normalizeText(q) === normalizedQueue);
+}
+
 app.get("/api/wallboard", requireSession, async (req, res) => {
   try {
     const userTeamId = req.session?.user?.teamId || "";
 
-    const [allAgents, allTasks] = await Promise.all([
+    const [allAgents, allTasks, allowedQueues] = await Promise.all([
       getAgentSessions(),
-      getTaskDetails()
+      getTaskDetails(),
+      getAllowedQueuesForTeam(userTeamId)
     ]);
 
     const agents = allAgents
       .filter(a => a.isActive === true)
       .filter(a => a.teamId === userTeamId);
 
-    const teamTasks = allTasks
-      .filter(t => String(t.channelType).toLowerCase() === "telephony")
-      .filter(t => t?.lastTeam?.id === userTeamId);
+    const telephonyTasks = allTasks
+      .filter(t => String(t.channelType).toLowerCase() === "telephony");
 
-    // Detect all queues dynamically used by this team
-    const allowedQueues = Array.from(
-      new Set(
-        teamTasks
-          .map(t => t?.lastQueue?.name || t?.firstQueueName || "")
-          .filter(Boolean)
-      )
-    );
+    const allowedQueueTasks = telephonyTasks
+      .filter(t => queueNameAllowed(getQueueNameFromTask(t), allowedQueues));
 
-    const waitingTasks = allTasks
-      .filter(t => String(t.channelType).toLowerCase() === "telephony")
+    const waitingTasks = allowedQueueTasks
       .filter(t => t?.isActive === true)
-      .filter(t => ["new", "parked"].includes(String(t.status).toLowerCase()))
-      .filter(t => {
-        const queueName =
-          t?.lastQueue?.name ||
-          t?.firstQueueName ||
-          "";
+      .filter(t => ["new", "parked"].includes(String(t.status).toLowerCase()));
 
-        return allowedQueues.includes(queueName);
-      });
-
-    const connectedTasks = teamTasks.filter(
+    const connectedTasks = allowedQueueTasks.filter(
       t => String(t.status).toLowerCase() === "connected"
     );
 
     const avgWaitSeconds =
-      teamTasks.length > 0
+      allowedQueueTasks.length > 0
         ? Math.round(
-            teamTasks.reduce((sum, t) => sum + Number(t.queueDuration || 0), 0) /
-              teamTasks.length /
+            allowedQueueTasks.reduce((sum, t) => sum + Number(t.queueDuration || 0), 0) /
+              allowedQueueTasks.length /
               1000
           )
         : 0;
 
     const avgHandleSeconds =
-      teamTasks.length > 0
+      allowedQueueTasks.length > 0
         ? Math.round(
-            teamTasks.reduce((sum, t) => sum + Number(t.connectedDuration || 0), 0) /
-              teamTasks.length /
+            allowedQueueTasks.reduce((sum, t) => sum + Number(t.connectedDuration || 0), 0) /
+              allowedQueueTasks.length /
               1000
           )
         : 0;
@@ -520,12 +700,12 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
     res.json({
       ok: true,
       source: "webex-search-api",
+      queueSource: "wxcc-config-api",
       entryPointId: ENTRY_POINT_ID,
       teamId: userTeamId,
       generatedAt: new Date().toISOString(),
-
-      // Dynamically detected queues for current team
       allowedQueues,
+      queueConfigError: queueConfigCache.error?.message || null,
 
       queue: {
         callsInQueue: waitingTasks.length,
@@ -557,7 +737,7 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
         };
       }),
 
-      taskList: teamTasks.map(task => ({
+      taskList: connectedTasks.map(task => ({
         id: task.id,
         status: task.status,
         caller: task.origin || "",
@@ -589,6 +769,44 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
     });
   }
 });
+
+app.get("/api/debug/queues", requireSession, async (req, res) => {
+  try {
+    const userTeamId = req.session?.user?.teamId || "";
+    const cache = await getQueueConfig(true);
+    const allowedQueues = await getAllowedQueuesForTeam(userTeamId);
+
+    res.json({
+      ok: true,
+      teamId: userTeamId,
+      allowedQueues,
+      queueConfigError: queueConfigCache.error?.message || null,
+      queueCount: cache.queues.length,
+      queues: cache.queues.map(q => ({
+        id: q.id,
+        name: q.name,
+        matchesCurrentTeam: queueTeamMatches(q.raw, userTeamId),
+        rawTeamFields: {
+          teams: q.raw?.teams,
+          team: q.raw?.team,
+          assignedTeams: q.raw?.assignedTeams,
+          teamList: q.raw?.teamList,
+          teamDetails: q.raw?.teamDetails,
+          teamIds: q.raw?.teamIds,
+          teamIdList: q.raw?.teamIdList,
+          assignedTeamIds: q.raw?.assignedTeamIds,
+          teamId: q.raw?.teamId
+        }
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Secure widget backend listening on ${PORT}`);
