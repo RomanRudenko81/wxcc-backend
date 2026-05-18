@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-call-history-layout-wrapup-fix-2026-05-18-v3";
+const BUILD_ID = "wxcc-wrapup-discovery-handle-type-2026-05-18-v4";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1045,6 +1045,7 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       isContactHandled: task.isContactHandled === true,
       abandonedType: task.abandonedType || "",
       contactHandleType: task.contactHandleType || "",
+      handleType: task.contactHandleType || task.abandonedType || "",
       wrapupReason: getWrapupReasonFromTask(task)
     }))
   };
@@ -1577,6 +1578,8 @@ app.get("/api/debug/build", (req, res) => {
     callVisibilityRetryOptimized: true,
     callHistoryEnabled: true,
     callHistoryWrapupEnabled: true,
+    callHistoryHandleTypeEnabled: true,
+    wrapupDiscoveryEnabled: true,
     callHistoryFullWidth: true,
     taskDetailsWrapupVariant: lastTaskDetailsQueryVariant,
     callHistoryWindow: "last-24h",
@@ -1657,6 +1660,243 @@ app.get("/api/debug/task-sample", requireSession, requireWriteRole, async (req, 
       error: err.message
     });
   }
+});
+
+
+
+function summarizeSearchResult(result, maxRows = 5) {
+  const summary = {
+    keys: result && typeof result === "object" ? Object.keys(result) : [],
+    sample: null
+  };
+
+  function findArrays(value, path = []) {
+    const arrays = [];
+
+    if (!value || typeof value !== "object") return arrays;
+
+    if (Array.isArray(value)) {
+      arrays.push({
+        path: path.join(".") || "root",
+        length: value.length,
+        sample: value.slice(0, maxRows)
+      });
+      return arrays;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      arrays.push(...findArrays(child, [...path, key]));
+    }
+
+    return arrays;
+  }
+
+  summary.arrays = findArrays(result);
+  return summary;
+}
+
+async function runWrapupDiscoveryQuery(name, query, variables) {
+  try {
+    const result = await postSearchQuery(query, variables);
+
+    return {
+      name,
+      ok: true,
+      summary: summarizeSearchResult(result),
+      raw: result
+    };
+  } catch (err) {
+    return {
+      name,
+      ok: false,
+      error: err.message
+    };
+  }
+}
+
+app.get("/api/debug/wrapup-discovery", requireSession, requireWriteRole, async (req, res) => {
+  const now = Date.now();
+  const variables = {
+    from: now - 86400000,
+    to: now
+  };
+
+  const queries = [
+    {
+      name: "customerActivityRecords",
+      query: `
+        query WrapupDiscovery($from: Long!, $to: Long!) {
+          customerActivityRecords(from: $from, to: $to) {
+            records {
+              contactSessionId
+              recordId
+              recordUniqueId
+              taskId
+              queueName
+              agentName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              wrapupReason
+              contactHandleType
+              createdTime
+              endedTime
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "customerActivityRecord",
+      query: `
+        query WrapupDiscovery($from: Long!, $to: Long!) {
+          customerActivityRecord(from: $from, to: $to) {
+            records {
+              contactSessionId
+              recordId
+              recordUniqueId
+              taskId
+              queueName
+              agentName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              wrapupReason
+              contactHandleType
+              createdTime
+              endedTime
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "contactSession",
+      query: `
+        query WrapupDiscovery($from: Long!, $to: Long!) {
+          contactSession(from: $from, to: $to) {
+            sessions {
+              contactSessionId
+              taskId
+              queueName
+              agentName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              wrapupReason
+              contactHandleType
+              createdTime
+              endedTime
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "contactSessions",
+      query: `
+        query WrapupDiscovery($from: Long!, $to: Long!) {
+          contactSessions(from: $from, to: $to) {
+            sessions {
+              contactSessionId
+              taskId
+              queueName
+              agentName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              wrapupReason
+              contactHandleType
+              createdTime
+              endedTime
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "wrapupReports",
+      query: `
+        query WrapupDiscovery($from: Long!, $to: Long!) {
+          wrapupReports(from: $from, to: $to) {
+            records {
+              agentName
+              teamName
+              queueName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              count
+              createdTime
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "wrapUpReports",
+      query: `
+        query WrapupDiscovery($from: Long!, $to: Long!) {
+          wrapUpReports(from: $from, to: $to) {
+            records {
+              agentName
+              teamName
+              queueName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              count
+              createdTime
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "taskDetailsWithPotentialWrapupFields",
+      query: `
+        query WrapupDiscovery($from: Long!, $to: Long!) {
+          taskDetails(from: $from, to: $to) {
+            tasks {
+              id
+              status
+              channelType
+              createdTime
+              endedTime
+              firstQueueName
+              contactHandleType
+              abandonedType
+              wrapUpReason
+              wrapupReason
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpCode
+              wrapupCode
+              wrapUpReasonName
+              wrapupReasonName
+              lastQueue { id name }
+              lastAgent { id name }
+            }
+          }
+        }
+      `
+    }
+  ];
+
+  const results = [];
+
+  for (const item of queries) {
+    results.push(await runWrapupDiscoveryQuery(item.name, item.query, variables));
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    from: variables.from,
+    to: variables.to,
+    note: "This endpoint tests candidate Analyzer/Search GraphQL contexts for per-call wrap-up fields. Failed queries are expected during discovery.",
+    results
+  });
 });
 
 
