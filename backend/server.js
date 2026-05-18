@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-event-only-realtime-call-retry-2026-05-18-v4";
+const BUILD_ID = "wxcc-event-realtime-call-history-2026-05-18-v1";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -884,6 +884,12 @@ async function buildWallboardPayload(session, forceRefresh = false) {
     t => String(t.status).toLowerCase() === "connected"
   );
 
+  // Call history for the currently allowed voice queues.
+  // getTaskDetails() already queries the last 24 hours.
+  const callHistoryTasks = allowedQueueTasks
+    .slice()
+    .sort((a, b) => Number(b.createdTime || 0) - Number(a.createdTime || 0));
+
   const avgWaitSeconds =
     allowedQueueTasks.length > 0
       ? Math.round(
@@ -981,6 +987,26 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       waitingSeconds: task.createdTime
         ? Math.floor((Date.now() - Number(task.createdTime)) / 1000)
         : 0
+    })),
+
+    callHistoryList: callHistoryTasks.map(task => ({
+      id: task.id,
+      status: task.status,
+      caller: task.origin || "",
+      destination: task.destination || "",
+      queue: task?.lastQueue?.name || "",
+      firstQueue: task?.firstQueueName || "",
+      entryPoint: task?.lastEntryPoint?.name || "",
+      agent: task?.lastAgent?.name || "",
+      createdTime: task.createdTime || null,
+      endedTime: task.endedTime || null,
+      queueDuration: task.queueDuration || 0,
+      connectedDuration: task.connectedDuration || 0,
+      totalDuration: task.totalDuration || 0,
+      isActive: task.isActive === true,
+      isContactHandled: task.isContactHandled === true,
+      abandonedType: task.abandonedType || "",
+      contactHandleType: task.contactHandleType || ""
     }))
   };
 }
@@ -1510,6 +1536,8 @@ app.get("/api/debug/build", (req, res) => {
     eventOnlyRealtime: true,
     eventTriggeredRetryBurst: true,
     callVisibilityRetryOptimized: true,
+    callHistoryEnabled: true,
+    callHistoryWindow: "last-24h",
     defaultEventRefreshDebounceMs: 1200,
     eventRefreshRetryDelaysMs: EVENT_REFRESH_RETRY_DELAYS_MS,
     fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
