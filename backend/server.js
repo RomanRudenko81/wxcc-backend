@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-event-realtime-call-history-2026-05-18-v1";
+const BUILD_ID = "wxcc-call-history-wrapup-2026-05-18-v2";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -303,8 +303,7 @@ async function getAgentSessions() {
 async function getTaskDetails() {
   const now = Date.now();
 
-  const result = await postSearchQuery(
-    `
+  const queryWithoutWrapup = `
     query TaskDetailsWallboard($from: Long!, $to: Long!) {
       taskDetails(from: $from, to: $to) {
         tasks {
@@ -327,33 +326,58 @@ async function getTaskDetails() {
           lastActivityTime
           firstQueueId
           firstQueueName
-          lastQueue {
-            id
-            name
-          }
-          lastEntryPoint {
-            id
-            name
-          }
-          lastTeam {
-            id
-            name
-          }
-          lastAgent {
-            id
-            name
-          }
+          lastQueue { id name }
+          lastEntryPoint { id name }
+          lastTeam { id name }
+          lastAgent { id name }
         }
       }
     }
-    `,
-    {
-      from: now - 86400000,
-      to: now
-    }
-  );
+  `;
 
-  return result?.data?.taskDetails?.tasks || [];
+  const queryWithWrapup = `
+    query TaskDetailsWallboard($from: Long!, $to: Long!) {
+      taskDetails(from: $from, to: $to) {
+        tasks {
+          id
+          status
+          channelType
+          createdTime
+          endedTime
+          origin
+          destination
+          direction
+          isActive
+          isContactHandled
+          isContactOffered
+          abandonedType
+          contactHandleType
+          wrapUpReason
+          queueDuration
+          connectedDuration
+          totalDuration
+          lastActivityTime
+          firstQueueId
+          firstQueueName
+          lastQueue { id name }
+          lastEntryPoint { id name }
+          lastTeam { id name }
+          lastAgent { id name }
+        }
+      }
+    }
+  `;
+
+  const variables = { from: now - 86400000, to: now };
+
+  try {
+    const result = await postSearchQuery(queryWithWrapup, variables);
+    return result?.data?.taskDetails?.tasks || [];
+  } catch (err) {
+    console.warn("TaskDetails query with wrapUpReason failed, falling back without wrapup field:", err.message);
+    const result = await postSearchQuery(queryWithoutWrapup, variables);
+    return result?.data?.taskDetails?.tasks || [];
+  }
 }
 
 function getPrimaryChannelInfo(agent) {
@@ -856,6 +880,24 @@ async function getWallboardSourceData(force = false) {
   return wallboardDataCache.updating;
 }
 
+function getWrapupReasonFromTask(task) {
+  return (
+    task?.wrapUpReason ||
+    task?.wrapupReason ||
+    task?.wrapUpCodeName ||
+    task?.wrapupCodeName ||
+    task?.wrapUpCode ||
+    task?.wrapupCode ||
+    task?.wrapUpData?.name ||
+    task?.wrapupData?.name ||
+    task?.wrapUp?.name ||
+    task?.wrapup?.name ||
+    task?.wrapUpReasonName ||
+    task?.wrapupReasonName ||
+    ""
+  );
+}
+
 async function buildWallboardPayload(session, forceRefresh = false) {
   const access = await getAllowedQueuesForSession(session);
   const allowedQueues = access.allowedQueues || [];
@@ -973,7 +1015,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       entryPoint: task?.lastEntryPoint?.name || "",
       agent: task?.lastAgent?.name || "",
       queueDuration: task.queueDuration || 0,
-      connectedDuration: task.connectedDuration || 0
+      connectedDuration: task.connectedDuration || 0,
+      wrapupReason: getWrapupReasonFromTask(task)
     })),
 
     waitingTaskList: waitingTasks.map(task => ({
@@ -986,7 +1029,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       createdTime: task.createdTime || null,
       waitingSeconds: task.createdTime
         ? Math.floor((Date.now() - Number(task.createdTime)) / 1000)
-        : 0
+        : 0,
+      wrapupReason: getWrapupReasonFromTask(task)
     })),
 
     callHistoryList: callHistoryTasks.map(task => ({
@@ -1006,7 +1050,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       isActive: task.isActive === true,
       isContactHandled: task.isContactHandled === true,
       abandonedType: task.abandonedType || "",
-      contactHandleType: task.contactHandleType || ""
+      contactHandleType: task.contactHandleType || "",
+      wrapupReason: getWrapupReasonFromTask(task)
     }))
   };
 }
@@ -1537,6 +1582,7 @@ app.get("/api/debug/build", (req, res) => {
     eventTriggeredRetryBurst: true,
     callVisibilityRetryOptimized: true,
     callHistoryEnabled: true,
+    callHistoryWrapupEnabled: true,
     callHistoryWindow: "last-24h",
     defaultEventRefreshDebounceMs: 1200,
     eventRefreshRetryDelaysMs: EVENT_REFRESH_RETRY_DELAYS_MS,
