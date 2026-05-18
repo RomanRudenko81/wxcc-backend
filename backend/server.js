@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-call-history-wrapup-2026-05-18-v2";
+const BUILD_ID = "wxcc-call-history-layout-wrapup-fix-2026-05-18-v3";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -303,10 +303,7 @@ async function getAgentSessions() {
 async function getTaskDetails() {
   const now = Date.now();
 
-  const queryWithoutWrapup = `
-    query TaskDetailsWallboard($from: Long!, $to: Long!) {
-      taskDetails(from: $from, to: $to) {
-        tasks {
+  const taskBaseFields = `
           id
           status
           channelType
@@ -330,54 +327,50 @@ async function getTaskDetails() {
           lastEntryPoint { id name }
           lastTeam { id name }
           lastAgent { id name }
-        }
-      }
-    }
   `;
 
-  const queryWithWrapup = `
-    query TaskDetailsWallboard($from: Long!, $to: Long!) {
-      taskDetails(from: $from, to: $to) {
-        tasks {
-          id
-          status
-          channelType
-          createdTime
-          endedTime
-          origin
-          destination
-          direction
-          isActive
-          isContactHandled
-          isContactOffered
-          abandonedType
-          contactHandleType
-          wrapUpReason
-          queueDuration
-          connectedDuration
-          totalDuration
-          lastActivityTime
-          firstQueueId
-          firstQueueName
-          lastQueue { id name }
-          lastEntryPoint { id name }
-          lastTeam { id name }
-          lastAgent { id name }
-        }
-      }
-    }
-  `;
+  const wrapupVariants = [
+    { name: "wrapUpReason", fields: "wrapUpReason" },
+    { name: "wrapupReason", fields: "wrapupReason" },
+    { name: "wrapUpCodeName", fields: "wrapUpCodeName" },
+    { name: "wrapupCodeName", fields: "wrapupCodeName" },
+    { name: "wrapUpCode", fields: "wrapUpCode" },
+    { name: "wrapupCode", fields: "wrapupCode" },
+    { name: "wrapUpReasonName", fields: "wrapUpReasonName" },
+    { name: "wrapupReasonName", fields: "wrapupReasonName" },
+    { name: "wrapUpData", fields: "wrapUpData { id name }" },
+    { name: "wrapupData", fields: "wrapupData { id name }" },
+    { name: "wrapUp", fields: "wrapUp { id name }" },
+    { name: "wrapup", fields: "wrapup { id name }" },
+    { name: "base", fields: "" }
+  ];
 
   const variables = { from: now - 86400000, to: now };
 
-  try {
-    const result = await postSearchQuery(queryWithWrapup, variables);
-    return result?.data?.taskDetails?.tasks || [];
-  } catch (err) {
-    console.warn("TaskDetails query with wrapUpReason failed, falling back without wrapup field:", err.message);
-    const result = await postSearchQuery(queryWithoutWrapup, variables);
-    return result?.data?.taskDetails?.tasks || [];
+  for (const variant of wrapupVariants) {
+    const query = `
+      query TaskDetailsWallboard($from: Long!, $to: Long!) {
+        taskDetails(from: $from, to: $to) {
+          tasks {
+            ${taskBaseFields}
+            ${variant.fields}
+          }
+        }
+      }
+    `;
+
+    try {
+      const result = await postSearchQuery(query, variables);
+      const tasks = result?.data?.taskDetails?.tasks || [];
+      lastTaskDetailsQueryVariant = variant.name;
+      return tasks;
+    } catch (err) {
+      console.warn(`TaskDetails query variant ${variant.name} failed:`, err.message);
+    }
   }
+
+  lastTaskDetailsQueryVariant = "failed";
+  return [];
 }
 
 function getPrimaryChannelInfo(agent) {
@@ -834,6 +827,7 @@ const WXCC_EVENT_TYPES_ENDPOINTS = String(
 const wallboardSseClients = new Set();
 let lastWxccEvent = null;
 let eventRefreshTimer = null;
+let lastTaskDetailsQueryVariant = "base";
 
 let wallboardDataCache = {
   updatedAt: 0,
@@ -1583,6 +1577,8 @@ app.get("/api/debug/build", (req, res) => {
     callVisibilityRetryOptimized: true,
     callHistoryEnabled: true,
     callHistoryWrapupEnabled: true,
+    callHistoryFullWidth: true,
+    taskDetailsWrapupVariant: lastTaskDetailsQueryVariant,
     callHistoryWindow: "last-24h",
     defaultEventRefreshDebounceMs: 1200,
     eventRefreshRetryDelaysMs: EVENT_REFRESH_RETRY_DELAYS_MS,
@@ -1640,6 +1636,29 @@ app.get("/api/admin/event-types", requireSession, requireWriteRole, async (req, 
     res.status(500).json({ ok: false, buildId: BUILD_ID, error: err.message });
   }
 });
+
+
+app.get("/api/debug/task-sample", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const tasks = await getTaskDetails();
+    const sample = tasks.slice(0, 5);
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      lastTaskDetailsQueryVariant,
+      count: tasks.length,
+      sample
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err.message
+    });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Secure widget backend listening on ${PORT}`);
