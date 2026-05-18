@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-event-only-realtime-2026-05-18-v1";
+const BUILD_ID = "wxcc-event-only-realtime-delay-fix-2026-05-18-v2";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -776,7 +776,7 @@ const WALLBOARD_FALLBACK_POLLING_ENABLED =
   String(process.env.WALLBOARD_FALLBACK_POLLING_ENABLED || "false").toLowerCase() === "true";
 const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
 const WXCC_EVENT_WEBHOOK_SECRET = process.env.WXCC_EVENT_WEBHOOK_SECRET || "";
-const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 0);
+const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 1500);
 
 const WXCC_SUBSCRIPTION_TARGET_URL =
   process.env.WXCC_SUBSCRIPTION_TARGET_URL ||
@@ -1016,7 +1016,7 @@ function scheduleEventDrivenWallboardRefresh(reason = "wxcc-event") {
     clearTimeout(eventRefreshTimer);
   }
 
-  eventRefreshTimer = setTimeout(async () => {
+  const pushFreshWallboard = async refreshReason => {
     try {
       await getWallboardSourceData(true);
 
@@ -1026,17 +1026,27 @@ function scheduleEventDrivenWallboardRefresh(reason = "wxcc-event") {
 
       broadcastSseEvent("event-refresh", {
         ok: true,
-        reason,
+        reason: refreshReason,
         generatedAt: new Date().toISOString(),
         clientCount: wallboardSseClients.size
       });
     } catch (err) {
       broadcastSseEvent("error", {
         ok: false,
-        reason,
+        reason: refreshReason,
         error: err.message
       });
     }
+  };
+
+  eventRefreshTimer = setTimeout(async () => {
+    await pushFreshWallboard(reason);
+
+    // WXCC Webhook Events can arrive slightly before Search/State APIs reflect the new state.
+    // A short second refresh prevents the widget from showing the previous agent state.
+    setTimeout(() => {
+      pushFreshWallboard(`${reason}:follow-up`);
+    }, 1500);
   }, EVENT_REFRESH_DEBOUNCE_MS);
 }
 
@@ -1487,6 +1497,8 @@ app.get("/api/debug/build", (req, res) => {
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
     eventOnlyRealtime: true,
+    delayedEventRefresh: true,
+    defaultEventRefreshDebounceMs: 1500,
     fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
     expectedEventTypesPath: "/api/admin/wxcc-event-types"
   });
