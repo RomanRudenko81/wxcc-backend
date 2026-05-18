@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-eventtypes-build-verified-2026-05-18-v3";
+const BUILD_ID = "wxcc-event-only-realtime-2026-05-18-v1";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -772,9 +772,11 @@ function queueNameAllowed(queueName, allowedQueues) {
 
 
 const WALLBOARD_DATA_CACHE_TTL_MS = Number(process.env.WALLBOARD_DATA_CACHE_TTL_MS || 5000);
+const WALLBOARD_FALLBACK_POLLING_ENABLED =
+  String(process.env.WALLBOARD_FALLBACK_POLLING_ENABLED || "false").toLowerCase() === "true";
 const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
 const WXCC_EVENT_WEBHOOK_SECRET = process.env.WXCC_EVENT_WEBHOOK_SECRET || "";
-const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 500);
+const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 0);
 
 const WXCC_SUBSCRIPTION_TARGET_URL =
   process.env.WXCC_SUBSCRIPTION_TARGET_URL ||
@@ -1098,17 +1100,21 @@ app.get("/api/wallboard/stream", async (req, res) => {
 
   writeSseEvent(res, "ready", {
     ok: true,
-    mode: "event-bridge",
+    mode: WALLBOARD_FALLBACK_POLLING_ENABLED ? "event-bridge-with-fallback" : "event-only",
     generatedAt: new Date().toISOString(),
-    fallbackRefreshMs: WALLBOARD_DATA_CACHE_TTL_MS,
+    fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
+    fallbackRefreshMs: WALLBOARD_FALLBACK_POLLING_ENABLED ? WALLBOARD_DATA_CACHE_TTL_MS : null,
     eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS
   });
 
+  // Initial load once when the widget connects.
   await pushWallboardUpdateToClient(client, true);
 
-  const fallbackTimer = setInterval(() => {
-    pushWallboardUpdateToClient(client, false);
-  }, WALLBOARD_DATA_CACHE_TTL_MS);
+  const fallbackTimer = WALLBOARD_FALLBACK_POLLING_ENABLED
+    ? setInterval(() => {
+        pushWallboardUpdateToClient(client, false);
+      }, WALLBOARD_DATA_CACHE_TTL_MS)
+    : null;
 
   const heartbeatTimer = setInterval(() => {
     res.write(`: heartbeat ${Date.now()}\n\n`);
@@ -1116,7 +1122,7 @@ app.get("/api/wallboard/stream", async (req, res) => {
 
   req.on("close", () => {
     wallboardSseClients.delete(client);
-    clearInterval(fallbackTimer);
+    if (fallbackTimer) clearInterval(fallbackTimer);
     clearInterval(heartbeatTimer);
   });
 });
@@ -1184,7 +1190,8 @@ app.get("/api/debug/events", requireSession, (req, res) => {
     ok: true,
     sseClients: wallboardSseClients.size,
     lastWxccEvent,
-    fallbackRefreshMs: WALLBOARD_DATA_CACHE_TTL_MS,
+    fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
+    fallbackRefreshMs: WALLBOARD_FALLBACK_POLLING_ENABLED ? WALLBOARD_DATA_CACHE_TTL_MS : null,
     eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS,
     webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET)
   });
@@ -1479,6 +1486,8 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    eventOnlyRealtime: true,
+    fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
     expectedEventTypesPath: "/api/admin/wxcc-event-types"
   });
 });
