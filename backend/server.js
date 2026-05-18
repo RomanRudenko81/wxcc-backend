@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-event-only-realtime-delay-fix-2026-05-18-v2";
+const BUILD_ID = "wxcc-event-only-realtime-call-retry-2026-05-18-v4";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -776,7 +776,13 @@ const WALLBOARD_FALLBACK_POLLING_ENABLED =
   String(process.env.WALLBOARD_FALLBACK_POLLING_ENABLED || "false").toLowerCase() === "true";
 const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
 const WXCC_EVENT_WEBHOOK_SECRET = process.env.WXCC_EVENT_WEBHOOK_SECRET || "";
-const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 1500);
+const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 1200);
+const EVENT_REFRESH_RETRY_DELAYS_MS = String(
+  process.env.EVENT_REFRESH_RETRY_DELAYS_MS || "800,1500,3000,5000,8000,12000,18000"
+)
+  .split(",")
+  .map(v => Number(v.trim()))
+  .filter(v => Number.isFinite(v) && v >= 0);
 
 const WXCC_SUBSCRIPTION_TARGET_URL =
   process.env.WXCC_SUBSCRIPTION_TARGET_URL ||
@@ -1039,14 +1045,15 @@ function scheduleEventDrivenWallboardRefresh(reason = "wxcc-event") {
     }
   };
 
-  eventRefreshTimer = setTimeout(async () => {
-    await pushFreshWallboard(reason);
-
-    // WXCC Webhook Events can arrive slightly before Search/State APIs reflect the new state.
-    // A short second refresh prevents the widget from showing the previous agent state.
-    setTimeout(() => {
-      pushFreshWallboard(`${reason}:follow-up`);
-    }, 1500);
+  eventRefreshTimer = setTimeout(() => {
+    // WXCC sometimes publishes the webhook before the Search/State APIs are fully consistent.
+    // Therefore we do an event-triggered retry burst. This is not continuous polling:
+    // it only runs after a real WXCC event was received.
+    EVENT_REFRESH_RETRY_DELAYS_MS.forEach((delay, index) => {
+      setTimeout(() => {
+        pushFreshWallboard(`${reason}:retry-${index + 1}`);
+      }, delay);
+    });
   }, EVENT_REFRESH_DEBOUNCE_MS);
 }
 
@@ -1158,10 +1165,13 @@ app.post("/api/wxcc/events", (req, res) => {
   broadcastSseEvent("wxcc-event", {
     ok: true,
     receivedAt: lastWxccEvent.receivedAt,
-    headers: lastWxccEvent.headers
+    headers: lastWxccEvent.headers,
+    eventBody: lastWxccEvent.body
   });
 
-  scheduleEventDrivenWallboardRefresh("wxcc-webhook");
+  scheduleEventDrivenWallboardRefresh(
+    lastWxccEvent.headers.event || lastWxccEvent.body?.eventType || lastWxccEvent.body?.type || "wxcc-webhook"
+  );
 
   res.json({
     ok: true,
@@ -1203,6 +1213,7 @@ app.get("/api/debug/events", requireSession, (req, res) => {
     fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
     fallbackRefreshMs: WALLBOARD_FALLBACK_POLLING_ENABLED ? WALLBOARD_DATA_CACHE_TTL_MS : null,
     eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS,
+    eventRefreshRetryDelaysMs: EVENT_REFRESH_RETRY_DELAYS_MS,
     webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET)
   });
 });
@@ -1497,8 +1508,10 @@ app.get("/api/debug/build", (req, res) => {
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
     eventOnlyRealtime: true,
-    delayedEventRefresh: true,
-    defaultEventRefreshDebounceMs: 1500,
+    eventTriggeredRetryBurst: true,
+    callVisibilityRetryOptimized: true,
+    defaultEventRefreshDebounceMs: 1200,
+    eventRefreshRetryDelaysMs: EVENT_REFRESH_RETRY_DELAYS_MS,
     fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
     expectedEventTypesPath: "/api/admin/wxcc-event-types"
   });
