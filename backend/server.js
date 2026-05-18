@@ -1227,12 +1227,13 @@ function getSubscriptionEndpointUrl(path = WXCC_SUBSCRIPTION_ENDPOINT) {
   return `${WEBEX_BASE_URL}/${path}`;
 }
 
-function buildSubscriptionPayload(eventName) {
+function buildSubscriptionPayload(eventTypes = WXCC_SUBSCRIPTION_EVENTS) {
   const payload = {
-    name: `WXCC Supervisor Widget - ${eventName}`,
-    targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
-    event: eventName,
-    status: "ACTIVE"
+    name: "WXCC Supervisor Widget Realtime Events",
+    description: "Realtime events for the WXCC Supervisor Access Control widget",
+    destinationUrl: WXCC_SUBSCRIPTION_TARGET_URL,
+    eventTypes: Array.isArray(eventTypes) ? eventTypes : [eventTypes],
+    orgId: WEBEX_ORG_ID
   };
 
   if (WXCC_EVENT_WEBHOOK_SECRET) {
@@ -1273,12 +1274,12 @@ async function callSubscriptionApi(method, path = WXCC_SUBSCRIPTION_ENDPOINT, bo
   };
 }
 
-async function createWxccSubscription(eventName) {
-  const payload = buildSubscriptionPayload(eventName);
+async function createWxccSubscription(eventTypes = WXCC_SUBSCRIPTION_EVENTS) {
+  const payload = buildSubscriptionPayload(eventTypes);
   const result = await callSubscriptionApi("POST", WXCC_SUBSCRIPTION_ENDPOINT, payload);
 
   return {
-    eventName,
+    eventTypes: payload.eventTypes,
     payload,
     result
   };
@@ -1290,7 +1291,8 @@ app.get("/api/admin/wxcc-subscriptions/config", requireSession, requireWriteRole
     endpoint: getSubscriptionEndpointUrl(),
     targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
     events: WXCC_SUBSCRIPTION_EVENTS,
-    webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET)
+    webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET),
+    expectedPayload: buildSubscriptionPayload(WXCC_SUBSCRIPTION_EVENTS)
   });
 });
 
@@ -1319,21 +1321,16 @@ app.post("/api/admin/create-wxcc-subscriptions", requireSession, requireWriteRol
       ? req.body.events.map(v => String(v).trim()).filter(Boolean)
       : WXCC_SUBSCRIPTION_EVENTS;
 
-    const results = [];
+    const result = await createWxccSubscription(requestedEvents);
 
-    for (const eventName of requestedEvents) {
-      results.push(await createWxccSubscription(eventName));
-    }
-
-    const allOk = results.every(item => item.result.ok);
-
-    res.status(allOk ? 200 : 207).json({
-      ok: allOk,
+    res.status(result.result.ok ? 200 : result.result.status).json({
+      ok: result.result.ok,
       endpoint: getSubscriptionEndpointUrl(),
       targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
       events: requestedEvents,
       webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET),
-      results
+      payload: result.payload,
+      result: result.result
     });
   } catch (err) {
     res.status(500).json({
