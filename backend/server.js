@@ -784,8 +784,15 @@ const WXCC_SUBSCRIPTION_ENDPOINT =
   "/v1/subscriptions";
 
 const WXCC_SUBSCRIPTION_EVENTS = String(
-  process.env.WXCC_SUBSCRIPTION_EVENTS ||
-  "agent.login,agent.logout,agent.state_change,task.new,task.parked,task.connected,task.ended"
+  process.env.WXCC_SUBSCRIPTION_EVENTS || ""
+)
+  .split(",")
+  .map(v => v.trim())
+  .filter(Boolean);
+
+const WXCC_EVENT_TYPES_ENDPOINTS = String(
+  process.env.WXCC_EVENT_TYPES_ENDPOINTS ||
+  "/v1/event-types,/v1/eventTypes,/v1/events/types,/v1/subscriptions/event-types,/v1/subscriptions/eventTypes"
 )
   .split(",")
   .map(v => v.trim())
@@ -1274,6 +1281,92 @@ async function callSubscriptionApi(method, path = WXCC_SUBSCRIPTION_ENDPOINT, bo
   };
 }
 
+async function callWxccApi(method, path, body = null) {
+  const token = await getValidServiceToken();
+
+  const endpoint = getSubscriptionEndpointUrl(path);
+
+  const response = await fetch(endpoint, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {})
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
+  });
+
+  const text = await response.text();
+
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    endpoint,
+    body: json,
+    text: json ? undefined : text
+  };
+}
+
+function extractEventTypesFromPayload(payload) {
+  const values = new Set();
+
+  function visit(value) {
+    if (!value) return;
+
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+
+    if (typeof value !== "object") return;
+
+    const candidate =
+      value.eventType ||
+      value.eventName ||
+      value.type ||
+      value.name ||
+      value.id;
+
+    if (candidate && typeof candidate === "string") {
+      values.add(candidate);
+    }
+
+    for (const child of Object.values(value)) {
+      if (typeof child === "object") visit(child);
+    }
+  }
+
+  visit(payload);
+
+  return [...values].sort();
+}
+
+async function discoverWxccEventTypes() {
+  const results = [];
+
+  for (const endpoint of WXCC_EVENT_TYPES_ENDPOINTS) {
+    const result = await callWxccApi("GET", endpoint);
+    results.push({
+      endpoint: result.endpoint,
+      ok: result.ok,
+      status: result.status,
+      eventTypes: result.body ? extractEventTypesFromPayload(result.body) : [],
+      body: result.body,
+      text: result.text
+    });
+  }
+
+  return results;
+}
+
+
 async function createWxccSubscription(eventTypes = WXCC_SUBSCRIPTION_EVENTS) {
   const payload = buildSubscriptionPayload(eventTypes);
   const result = await callSubscriptionApi("POST", WXCC_SUBSCRIPTION_ENDPOINT, payload);
@@ -1292,7 +1385,8 @@ app.get("/api/admin/wxcc-subscriptions/config", requireSession, requireWriteRole
     targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
     events: WXCC_SUBSCRIPTION_EVENTS,
     webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET),
-    expectedPayload: buildSubscriptionPayload(WXCC_SUBSCRIPTION_EVENTS)
+    expectedPayload: WXCC_SUBSCRIPTION_EVENTS.length ? buildSubscriptionPayload(WXCC_SUBSCRIPTION_EVENTS) : null,
+    eventTypeDiscoveryEndpoints: WXCC_EVENT_TYPES_ENDPOINTS.map(getSubscriptionEndpointUrl)
   });
 });
 
@@ -1320,6 +1414,15 @@ app.post("/api/admin/create-wxcc-subscriptions", requireSession, requireWriteRol
     const requestedEvents = Array.isArray(req.body?.events) && req.body.events.length
       ? req.body.events.map(v => String(v).trim()).filter(Boolean)
       : WXCC_SUBSCRIPTION_EVENTS;
+
+    if (!requestedEvents.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "No WXCC subscription event types configured. Call GET /api/admin/wxcc-event-types first, then set WXCC_SUBSCRIPTION_EVENTS or pass { events: [...] } in the POST body.",
+        endpoint: getSubscriptionEndpointUrl(),
+        targetUrl: WXCC_SUBSCRIPTION_TARGET_URL
+      });
+    }
 
     const result = await createWxccSubscription(requestedEvents);
 
