@@ -775,6 +775,22 @@ const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
 const WXCC_EVENT_WEBHOOK_SECRET = process.env.WXCC_EVENT_WEBHOOK_SECRET || "";
 const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 500);
 
+const WXCC_SUBSCRIPTION_TARGET_URL =
+  process.env.WXCC_SUBSCRIPTION_TARGET_URL ||
+  "https://wxcc-backend.onrender.com/api/wxcc/events";
+
+const WXCC_SUBSCRIPTION_ENDPOINT =
+  process.env.WXCC_SUBSCRIPTION_ENDPOINT ||
+  "/v1/subscriptions";
+
+const WXCC_SUBSCRIPTION_EVENTS = String(
+  process.env.WXCC_SUBSCRIPTION_EVENTS ||
+  "agent.login,agent.logout,agent.state_change,task.new,task.parked,task.connected,task.ended"
+)
+  .split(",")
+  .map(v => v.trim())
+  .filter(Boolean);
+
 const wallboardSseClients = new Set();
 let lastWxccEvent = null;
 let eventRefreshTimer = null;
@@ -1202,6 +1218,155 @@ app.get("/api/debug/profile-queues", requireSession, async (req, res) => {
       error: err.message
     });
   }
+});
+
+
+function getSubscriptionEndpointUrl(path = WXCC_SUBSCRIPTION_ENDPOINT) {
+  if (/^https?:\/\//i.test(path)) return path;
+  if (path.startsWith("/")) return `${WEBEX_BASE_URL}${path}`;
+  return `${WEBEX_BASE_URL}/${path}`;
+}
+
+function buildSubscriptionPayload(eventName) {
+  const payload = {
+    name: `WXCC Supervisor Widget - ${eventName}`,
+    targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
+    event: eventName,
+    status: "ACTIVE"
+  };
+
+  if (WXCC_EVENT_WEBHOOK_SECRET) {
+    payload.secret = WXCC_EVENT_WEBHOOK_SECRET;
+  }
+
+  return payload;
+}
+
+async function callSubscriptionApi(method, path = WXCC_SUBSCRIPTION_ENDPOINT, body = null) {
+  const token = await getValidServiceToken();
+
+  const response = await fetch(getSubscriptionEndpointUrl(path), {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {})
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
+  });
+
+  const text = await response.text();
+
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    endpoint: getSubscriptionEndpointUrl(path),
+    body: json,
+    text: json ? undefined : text
+  };
+}
+
+async function createWxccSubscription(eventName) {
+  const payload = buildSubscriptionPayload(eventName);
+  const result = await callSubscriptionApi("POST", WXCC_SUBSCRIPTION_ENDPOINT, payload);
+
+  return {
+    eventName,
+    payload,
+    result
+  };
+}
+
+app.get("/api/admin/wxcc-subscriptions/config", requireSession, requireWriteRole, (req, res) => {
+  res.json({
+    ok: true,
+    endpoint: getSubscriptionEndpointUrl(),
+    targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
+    events: WXCC_SUBSCRIPTION_EVENTS,
+    webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET)
+  });
+});
+
+app.get("/api/admin/wxcc-subscriptions", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const result = await callSubscriptionApi("GET", WXCC_SUBSCRIPTION_ENDPOINT);
+
+    res.status(result.ok ? 200 : result.status).json({
+      ok: result.ok,
+      endpoint: result.endpoint,
+      status: result.status,
+      body: result.body,
+      text: result.text
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
+app.post("/api/admin/create-wxcc-subscriptions", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const requestedEvents = Array.isArray(req.body?.events) && req.body.events.length
+      ? req.body.events.map(v => String(v).trim()).filter(Boolean)
+      : WXCC_SUBSCRIPTION_EVENTS;
+
+    const results = [];
+
+    for (const eventName of requestedEvents) {
+      results.push(await createWxccSubscription(eventName));
+    }
+
+    const allOk = results.every(item => item.result.ok);
+
+    res.status(allOk ? 200 : 207).json({
+      ok: allOk,
+      endpoint: getSubscriptionEndpointUrl(),
+      targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
+      events: requestedEvents,
+      webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET),
+      results
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
+app.post("/api/admin/test-wxcc-event-bridge", requireSession, requireWriteRole, (req, res) => {
+  lastWxccEvent = {
+    receivedAt: new Date().toISOString(),
+    headers: {
+      event: "admin-test",
+      resource: "admin-test",
+      deliveryId: crypto.randomUUID()
+    },
+    body: req.body || {}
+  };
+
+  broadcastSseEvent("wxcc-event", {
+    ok: true,
+    receivedAt: lastWxccEvent.receivedAt,
+    headers: lastWxccEvent.headers
+  });
+
+  scheduleEventDrivenWallboardRefresh("admin-test");
+
+  res.json({
+    ok: true,
+    message: "Admin test event accepted. Wallboard refresh scheduled.",
+    receivedAt: lastWxccEvent.receivedAt
+  });
 });
 
 app.listen(PORT, () => {
