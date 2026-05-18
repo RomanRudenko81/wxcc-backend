@@ -13,7 +13,6 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://romanrudenko81.github.io",
   "https://cdn.jsdelivr.net",
   "https://desktop.wxcc-us1.cisco.com",
-  "https://desktop.wxcc-us2.cisco.com",
   "https://desktop.wxcc-eu1.cisco.com",
   "https://desktop.wxcc-eu2.cisco.com"
 ];
@@ -49,6 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
+const BUILD_ID = "wxcc-eventtypes-build-verified-2026-05-18-v3";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1382,6 +1382,7 @@ async function createWxccSubscription(eventTypes = WXCC_SUBSCRIPTION_EVENTS) {
 app.get("/api/admin/wxcc-subscriptions/config", requireSession, requireWriteRole, (req, res) => {
   res.json({
     ok: true,
+    buildId: BUILD_ID,
     endpoint: getSubscriptionEndpointUrl(),
     targetUrl: WXCC_SUBSCRIPTION_TARGET_URL,
     events: WXCC_SUBSCRIPTION_EVENTS,
@@ -1468,6 +1469,68 @@ app.post("/api/admin/test-wxcc-event-bridge", requireSession, requireWriteRole, 
     message: "Admin test event accepted. Wallboard refresh scheduled.",
     receivedAt: lastWxccEvent.receivedAt
   });
+});
+
+
+app.get("/api/debug/build", (req, res) => {
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    hasEventTypesEndpoint: true,
+    hasSubscriptionConfigEndpoint: true,
+    hasEventBridge: true,
+    expectedEventTypesPath: "/api/admin/wxcc-event-types"
+  });
+});
+
+app.get("/api/admin/wxcc-event-types", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const results = await discoverWxccEventTypes();
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      configuredEventTypes: WXCC_SUBSCRIPTION_EVENTS,
+      discoveryEndpoints: WXCC_EVENT_TYPES_ENDPOINTS.map(getSubscriptionEndpointUrl),
+      results
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, buildId: BUILD_ID, error: err.message });
+  }
+});
+
+app.get("/api/admin/wxcc-eventtypes", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const results = await discoverWxccEventTypes();
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      alias: "/api/admin/wxcc-eventtypes",
+      configuredEventTypes: WXCC_SUBSCRIPTION_EVENTS,
+      discoveryEndpoints: WXCC_EVENT_TYPES_ENDPOINTS.map(getSubscriptionEndpointUrl),
+      results
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, buildId: BUILD_ID, error: err.message });
+  }
+});
+
+app.get("/api/admin/event-types", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const results = await discoverWxccEventTypes();
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      alias: "/api/admin/event-types",
+      configuredEventTypes: WXCC_SUBSCRIPTION_EVENTS,
+      discoveryEndpoints: WXCC_EVENT_TYPES_ENDPOINTS.map(getSubscriptionEndpointUrl),
+      results
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, buildId: BUILD_ID, error: err.message });
+  }
 });
 
 app.listen(PORT, () => {
