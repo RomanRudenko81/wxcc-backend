@@ -13,6 +13,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://romanrudenko81.github.io",
   "https://cdn.jsdelivr.net",
   "https://desktop.wxcc-us1.cisco.com",
+  "https://desktop.wxcc-us2.cisco.com",
   "https://desktop.wxcc-eu1.cisco.com",
   "https://desktop.wxcc-eu2.cisco.com"
 ];
