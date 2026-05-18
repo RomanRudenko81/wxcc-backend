@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-wrapup-discovery-handle-type-2026-05-18-v4";
+const BUILD_ID = "wxcc-csr-report-today-debug-2026-05-18-v5";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1573,6 +1573,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    csrReportTodayDebugEnabled: true,
     eventOnlyRealtime: true,
     eventTriggeredRetryBurst: true,
     callVisibilityRetryOptimized: true,
@@ -1580,6 +1581,7 @@ app.get("/api/debug/build", (req, res) => {
     callHistoryWrapupEnabled: true,
     callHistoryHandleTypeEnabled: true,
     wrapupDiscoveryEnabled: true,
+    csrReportTodayDebugEnabled: true,
     callHistoryFullWidth: true,
     taskDetailsWrapupVariant: lastTaskDetailsQueryVariant,
     callHistoryWindow: "last-24h",
@@ -1899,6 +1901,293 @@ app.get("/api/debug/wrapup-discovery", requireSession, requireWriteRole, async (
   });
 });
 
+
+
+function getTodayRange(timeZone = "Europe/Berlin") {
+  // Render läuft typischerweise in UTC. Für den Debug nehmen wir bewusst lokale Browser/Server-Logik
+  // plus einen Tagesbereich, der den aktuellen Tag großzügig abdeckt.
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+
+  return {
+    from: start.getTime(),
+    to: now.getTime(),
+    timeZone
+  };
+}
+
+function summarizeCsrResult(result, maxRows = 5) {
+  function findArrays(value, path = []) {
+    const arrays = [];
+
+    if (!value || typeof value !== "object") return arrays;
+
+    if (Array.isArray(value)) {
+      arrays.push({
+        path: path.join(".") || "root",
+        length: value.length,
+        sample: value.slice(0, maxRows)
+      });
+      return arrays;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      arrays.push(...findArrays(child, [...path, key]));
+    }
+
+    return arrays;
+  }
+
+  return {
+    keys: result && typeof result === "object" ? Object.keys(result) : [],
+    arrays: findArrays(result)
+  };
+}
+
+async function runCsrDiscoveryQuery(name, query, variables) {
+  try {
+    const result = await postSearchQuery(query, variables);
+
+    return {
+      name,
+      ok: true,
+      summary: summarizeCsrResult(result),
+      raw: result
+    };
+  } catch (err) {
+    return {
+      name,
+      ok: false,
+      error: err.message
+    };
+  }
+}
+
+
+app.get("/api/debug/csr-report-today", requireSession, requireWriteRole, async (req, res) => {
+  const range = getTodayRange("Europe/Berlin");
+  const variables = {
+    from: range.from,
+    to: range.to
+  };
+
+  const queries = [
+    {
+      name: "csrReport",
+      query: `
+        query CsrReportToday($from: Long!, $to: Long!) {
+          csrReport(from: $from, to: $to) {
+            records {
+              contactSessionId
+              recordId
+              recordUniqueId
+              taskId
+              interactionId
+              channelType
+              origin
+              destination
+              direction
+              queueName
+              entryPointName
+              siteName
+              teamName
+              agentName
+              wrapUpReason
+              wrapupReason
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpCode
+              wrapupCode
+              contactHandleType
+              abandonedType
+              createdTime
+              connectedTime
+              endedTime
+              queueDuration
+              connectedDuration
+              totalDuration
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "csrReports",
+      query: `
+        query CsrReportToday($from: Long!, $to: Long!) {
+          csrReports(from: $from, to: $to) {
+            records {
+              contactSessionId
+              recordId
+              recordUniqueId
+              taskId
+              interactionId
+              channelType
+              origin
+              destination
+              direction
+              queueName
+              entryPointName
+              siteName
+              teamName
+              agentName
+              wrapUpReason
+              wrapupReason
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpCode
+              wrapupCode
+              contactHandleType
+              abandonedType
+              createdTime
+              connectedTime
+              endedTime
+              queueDuration
+              connectedDuration
+              totalDuration
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "customerSessionRecords",
+      query: `
+        query CsrReportToday($from: Long!, $to: Long!) {
+          customerSessionRecords(from: $from, to: $to) {
+            records {
+              contactSessionId
+              recordId
+              recordUniqueId
+              taskId
+              interactionId
+              channelType
+              origin
+              destination
+              direction
+              queueName
+              entryPointName
+              teamName
+              agentName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              wrapupReason
+              contactHandleType
+              abandonedType
+              createdTime
+              endedTime
+              totalDuration
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "customerSessionRecord",
+      query: `
+        query CsrReportToday($from: Long!, $to: Long!) {
+          customerSessionRecord(from: $from, to: $to) {
+            records {
+              contactSessionId
+              recordId
+              recordUniqueId
+              taskId
+              interactionId
+              channelType
+              origin
+              destination
+              direction
+              queueName
+              entryPointName
+              teamName
+              agentName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              wrapupReason
+              contactHandleType
+              abandonedType
+              createdTime
+              endedTime
+              totalDuration
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "contactSessionRecords",
+      query: `
+        query CsrReportToday($from: Long!, $to: Long!) {
+          contactSessionRecords(from: $from, to: $to) {
+            records {
+              contactSessionId
+              recordId
+              recordUniqueId
+              taskId
+              interactionId
+              channelType
+              origin
+              destination
+              direction
+              queueName
+              entryPointName
+              teamName
+              agentName
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpReason
+              wrapupReason
+              contactHandleType
+              abandonedType
+              createdTime
+              endedTime
+              totalDuration
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "csrReportMinimal",
+      query: `
+        query CsrReportToday($from: Long!, $to: Long!) {
+          csrReport(from: $from, to: $to) {
+            records {
+              contactSessionId
+              taskId
+              queueName
+              agentName
+              wrapUpCodeName
+              contactHandleType
+              createdTime
+              endedTime
+            }
+          }
+        }
+      `
+    }
+  ];
+
+  const results = [];
+
+  for (const item of queries) {
+    results.push(await runCsrDiscoveryQuery(item.name, item.query, variables));
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    report: "CSR Report - Today discovery",
+    from: variables.from,
+    to: variables.to,
+    timeZone: range.timeZone,
+    note: "This endpoint tests likely Search/Analyzer GraphQL contexts for the CSR Report with today's duration. Failed queries are expected during discovery.",
+    results
+  });
+});
 
 app.listen(PORT, () => {
   console.log(`Secure widget backend listening on ${PORT}`);
