@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-csr-report-today-debug-2026-05-18-v5";
+const BUILD_ID = "wxcc-search-schema-debug-2026-05-18-v6";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1574,6 +1574,7 @@ app.get("/api/debug/build", (req, res) => {
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
     csrReportTodayDebugEnabled: true,
+    searchSchemaDebugEnabled: true,
     eventOnlyRealtime: true,
     eventTriggeredRetryBurst: true,
     callVisibilityRetryOptimized: true,
@@ -1582,6 +1583,7 @@ app.get("/api/debug/build", (req, res) => {
     callHistoryHandleTypeEnabled: true,
     wrapupDiscoveryEnabled: true,
     csrReportTodayDebugEnabled: true,
+    searchSchemaDebugEnabled: true,
     callHistoryFullWidth: true,
     taskDetailsWrapupVariant: lastTaskDetailsQueryVariant,
     callHistoryWindow: "last-24h",
@@ -2188,6 +2190,199 @@ app.get("/api/debug/csr-report-today", requireSession, requireWriteRole, async (
     results
   });
 });
+
+
+function unwrapGraphqlType(type) {
+  if (!type) return "";
+
+  if (type.kind === "NON_NULL") {
+    return `${unwrapGraphqlType(type.ofType)}!`;
+  }
+
+  if (type.kind === "LIST") {
+    return `[${unwrapGraphqlType(type.ofType)}]`;
+  }
+
+  return type.name || type.kind || "";
+}
+
+function summarizeGraphqlField(field) {
+  return {
+    name: field.name,
+    type: unwrapGraphqlType(field.type),
+    args: (field.args || []).map(arg => ({
+      name: arg.name,
+      type: unwrapGraphqlType(arg.type)
+    }))
+  };
+}
+
+app.get("/api/debug/search-schema", requireSession, requireWriteRole, async (req, res) => {
+  const query = `
+    query SearchSchemaIntrospection {
+      __schema {
+        queryType {
+          fields {
+            name
+            type {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                    ofType {
+                      kind
+                      name
+                    }
+                  }
+                }
+              }
+            }
+            args {
+              name
+              type {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                    ofType {
+                      kind
+                      name
+                      ofType {
+                        kind
+                        name
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const result = await postSearchQuery(query, {});
+    const fields = result?.data?.__schema?.queryType?.fields || [];
+    const summarizedFields = fields.map(summarizeGraphqlField);
+
+    const keywords = [
+      "csr",
+      "customer",
+      "contact",
+      "session",
+      "activity",
+      "record",
+      "wrap",
+      "wrapup",
+      "wrapUp",
+      "aux",
+      "auxiliary",
+      "agent",
+      "task"
+    ];
+
+    const interestingFields = summarizedFields.filter(field => {
+      const haystack = `${field.name} ${field.type}`.toLowerCase();
+      return keywords.some(keyword => haystack.includes(keyword.toLowerCase()));
+    });
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      fieldCount: summarizedFields.length,
+      interestingFieldCount: interestingFields.length,
+      interestingFields,
+      allFields: summarizedFields
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err.message,
+      note: "If introspection is disabled, we need to discover the Analyzer report API via REST/report definitions instead."
+    });
+  }
+});
+
+app.get("/api/debug/search-field-candidates", requireSession, requireWriteRole, async (req, res) => {
+  const now = Date.now();
+  const variables = {
+    from: now - 86400000,
+    to: now
+  };
+
+  const candidates = [
+    "agentWrapupAuxiliary",
+    "agentWrapUpAuxiliary",
+    "agentWrapupAuxiliaryReport",
+    "agentWrapUpAuxiliaryReport",
+    "agentWrapup",
+    "agentWrapUp",
+    "wrapupAuxiliary",
+    "wrapUpAuxiliary",
+    "wrapupAuxiliaryReport",
+    "wrapUpAuxiliaryReport",
+    "agentAuxiliary",
+    "agentAuxiliaryReport",
+    "csr",
+    "CSR",
+    "csrReport",
+    "customerSession",
+    "customerSessions",
+    "customerActivity",
+    "customerActivities",
+    "customerActivityRecord",
+    "customerActivityRecords"
+  ];
+
+  const results = [];
+
+  for (const field of candidates) {
+    const query = `
+      query Candidate($from: Long!, $to: Long!) {
+        ${field}(from: $from, to: $to) {
+          __typename
+        }
+      }
+    `;
+
+    try {
+      const result = await postSearchQuery(query, variables);
+      results.push({
+        field,
+        ok: true,
+        result
+      });
+    } catch (err) {
+      results.push({
+        field,
+        ok: false,
+        error: err.message
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    note: "This probes likely report/query field names with a minimal __typename selection.",
+    results
+  });
+});
+
 
 app.listen(PORT, () => {
   console.log(`Secure widget backend listening on ${PORT}`);
