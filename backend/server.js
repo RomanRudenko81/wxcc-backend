@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-termination-rate-limit-fix-2026-05-19-v13";
+const BUILD_ID = "wxcc-live-duration-fix-2026-05-19-v14";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1008,6 +1008,38 @@ async function callWxccRestDiscovery(method, path, body = null) {
   };
 }
 
+
+function getLiveTaskSeconds(task) {
+  const now = Date.now();
+
+  const candidates = [
+    task?.connectedTime,
+    task?.answeredTime,
+    task?.lastStateChangeTime,
+    task?.lastActivityTime,
+    task?.createdTime
+  ]
+    .map(v => Number(v || 0))
+    .filter(v => Number.isFinite(v) && v > 0);
+
+  if (!candidates.length) return 0;
+
+  // Use the newest available timestamp as best live start reference.
+  return Math.max(0, Math.floor((now - Math.max(...candidates)) / 1000));
+}
+
+function getTaskDurationSeconds(task) {
+  const totalDuration = Number(task?.totalDuration || 0);
+  const connectedDuration = Number(task?.connectedDuration || 0);
+  const queueDuration = Number(task?.queueDuration || 0);
+
+  if (totalDuration > 0) return Math.round(totalDuration / 1000);
+  if (connectedDuration > 0) return Math.round(connectedDuration / 1000);
+  if (queueDuration > 0) return Math.round(queueDuration / 1000);
+
+  return getLiveTaskSeconds(task);
+}
+
 async function buildWallboardPayload(session, forceRefresh = false) {
   const access = await getAllowedQueuesForSession(session);
   const allowedQueues = access.allowedQueues || [];
@@ -1118,21 +1150,30 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       };
     }),
 
-    taskList: connectedTasks.map(task => ({
-      id: task.id,
-      status: task.status,
-      caller: task.origin || "",
-      queue: task?.lastQueue?.name || "",
-      firstQueue: task?.firstQueueName || "",
-      entryPoint: task?.lastEntryPoint?.name || "",
-      agent: task?.lastAgent?.name || "",
-      queueDuration: task.queueDuration || 0,
-      connectedDuration: task.connectedDuration || 0,
-      wrapupReason: getWrapupReasonFromTask(task),
-      terminationReason: terminationByTaskId.get(task.id)?.terminationReason || "",
-      taskLegId: terminationByTaskId.get(task.id)?.taskLegId || "",
-      taskLegStatus: terminationByTaskId.get(task.id)?.taskLegStatus || ""
-    })),
+    taskList: connectedTasks.map(task => {
+      const liveHandleSeconds = getLiveTaskSeconds(task);
+      const connectedSeconds = Math.round(Number(task.connectedDuration || 0) / 1000);
+
+      return {
+        id: task.id,
+        status: task.status,
+        caller: task.origin || "",
+        queue: task?.lastQueue?.name || "",
+        firstQueue: task?.firstQueueName || "",
+        entryPoint: task?.lastEntryPoint?.name || "",
+        agent: task?.lastAgent?.name || "",
+        createdTime: task.createdTime || null,
+        lastActivityTime: task.lastActivityTime || null,
+        queueDuration: task.queueDuration || 0,
+        connectedDuration: task.connectedDuration || 0,
+        liveHandleSeconds,
+        handleSeconds: connectedSeconds > 0 ? connectedSeconds : liveHandleSeconds,
+        wrapupReason: getWrapupReasonFromTask(task),
+        terminationReason: terminationByTaskId.get(task.id)?.terminationReason || "",
+        taskLegId: terminationByTaskId.get(task.id)?.taskLegId || "",
+        taskLegStatus: terminationByTaskId.get(task.id)?.taskLegStatus || ""
+      };
+    }),
 
     waitingTaskList: waitingTasks.map(task => ({
       id: task.id,
@@ -1166,6 +1207,7 @@ async function buildWallboardPayload(session, forceRefresh = false) {
         queueDuration: task.queueDuration || 0,
         connectedDuration: task.connectedDuration || 0,
         totalDuration: task.totalDuration || 0,
+        liveDurationSeconds: getTaskDurationSeconds(task),
         isActive: task.isActive === true,
         isContactHandled: task.isContactHandled === true,
         abandonedType: task.abandonedType || "",
@@ -3192,6 +3234,26 @@ app.get("/api/debug/termination-cache", requireSession, requireWriteRole, async 
     cacheCount: taskLegTerminationCache.map ? taskLegTerminationCache.map.size : 0,
     inFlight: !!taskLegTerminationCache.inFlight
   });
+});
+
+
+
+app.get("/api/debug/live-duration-payload", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const data = await buildWallboardPayload(req.session || {});
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      activeCalls: data.taskList || [],
+      callHistorySample: Array.isArray(data.callHistoryList) ? data.callHistoryList.slice(0, 5) : []
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err.message
+    });
+  }
 });
 
 
