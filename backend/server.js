@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-live-duration-fix-2026-05-19-v14";
+const BUILD_ID = "wxcc-client-live-timer-fix-2026-05-19-v15";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1166,8 +1166,10 @@ async function buildWallboardPayload(session, forceRefresh = false) {
         lastActivityTime: task.lastActivityTime || null,
         queueDuration: task.queueDuration || 0,
         connectedDuration: task.connectedDuration || 0,
+        connectedStartTime: task.lastActivityTime || task.createdTime || null,
         liveHandleSeconds,
         handleSeconds: connectedSeconds > 0 ? connectedSeconds : liveHandleSeconds,
+        handleBaseTimestamp: Date.now(),
         wrapupReason: getWrapupReasonFromTask(task),
         terminationReason: terminationByTaskId.get(task.id)?.terminationReason || "",
         taskLegId: terminationByTaskId.get(task.id)?.taskLegId || "",
@@ -1744,6 +1746,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    clientLiveTimerEnabled: true,
     taskLegTerminationCacheEnabled: true,
     taskLegTerminationEnabled: true,
     taskLegTerminationCacheEnabled: true,
