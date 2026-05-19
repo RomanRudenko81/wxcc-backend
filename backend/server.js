@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-search-schema-debug-2026-05-18-v6";
+const BUILD_ID = "wxcc-tasklegdetails-debug-2026-05-19-v7";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -2383,6 +2383,299 @@ app.get("/api/debug/search-field-candidates", requireSession, requireWriteRole, 
   });
 });
 
+
+
+function summarizeTaskLegResult(result, maxRows = 5) {
+  function findArrays(value, path = []) {
+    const arrays = [];
+
+    if (!value || typeof value !== "object") return arrays;
+
+    if (Array.isArray(value)) {
+      arrays.push({
+        path: path.join(".") || "root",
+        length: value.length,
+        sample: value.slice(0, maxRows)
+      });
+      return arrays;
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      arrays.push(...findArrays(child, [...path, key]));
+    }
+
+    return arrays;
+  }
+
+  return {
+    keys: result && typeof result === "object" ? Object.keys(result) : [],
+    arrays: findArrays(result)
+  };
+}
+
+async function runTaskLegDiscoveryQuery(name, query, variables) {
+  try {
+    const result = await postSearchQuery(query, variables);
+
+    return {
+      name,
+      ok: true,
+      summary: summarizeTaskLegResult(result),
+      raw: result
+    };
+  } catch (err) {
+    return {
+      name,
+      ok: false,
+      error: err.message
+    };
+  }
+}
+
+
+app.get("/api/debug/taskleg-schema", requireSession, requireWriteRole, async (req, res) => {
+  const query = `
+    query TaskLegSchema {
+      taskLegList: __type(name: "TaskLegDetailsList") {
+        name
+        kind
+        fields {
+          name
+          type {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      taskLeg: __type(name: "TaskLegDetails") {
+        name
+        kind
+        fields {
+          name
+          type {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      taskLegFilters: __type(name: "TaskLegDetailsFilters") {
+        name
+        kind
+        inputFields {
+          name
+          type {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const result = await postSearchQuery(query, {});
+    const listFields = result?.data?.taskLegList?.fields || [];
+    const detailFields = result?.data?.taskLeg?.fields || [];
+    const filterFields = result?.data?.taskLegFilters?.inputFields || [];
+
+    const keywords = [
+      "wrap", "reason", "disconnect", "disposition", "termination",
+      "ended", "end", "handle", "agent", "queue", "task", "session",
+      "leg", "contact", "code"
+    ];
+
+    const normalizedDetailFields = detailFields.map(field => ({
+      name: field.name,
+      type: unwrapGraphqlType(field.type)
+    }));
+
+    const interestingFields = normalizedDetailFields.filter(field => {
+      const haystack = `${field.name} ${field.type}`.toLowerCase();
+      return keywords.some(keyword => haystack.includes(keyword));
+    });
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      listType: {
+        name: result?.data?.taskLegList?.name || "",
+        fields: listFields.map(field => ({
+          name: field.name,
+          type: unwrapGraphqlType(field.type)
+        }))
+      },
+      detailType: {
+        name: result?.data?.taskLeg?.name || "",
+        fieldCount: normalizedDetailFields.length,
+        interestingFields,
+        allFields: normalizedDetailFields
+      },
+      filterType: {
+        name: result?.data?.taskLegFilters?.name || "",
+        fields: filterFields.map(field => ({
+          name: field.name,
+          type: unwrapGraphqlType(field.type)
+        }))
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err.message
+    });
+  }
+});
+
+app.get("/api/debug/taskleg-sample", requireSession, requireWriteRole, async (req, res) => {
+  const now = Date.now();
+  const variables = {
+    from: now - 86400000,
+    to: now
+  };
+
+  const queries = [
+    {
+      name: "minimal",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            tasks { id }
+          }
+        }
+      `
+    },
+    {
+      name: "commonFields",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            tasks {
+              id
+              status
+              channelType
+              createdTime
+              endedTime
+              origin
+              destination
+              direction
+              queueDuration
+              connectedDuration
+              totalDuration
+              contactHandleType
+              abandonedType
+              firstQueueName
+              lastQueue { id name }
+              lastAgent { id name }
+              lastTeam { id name }
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "wrapupCandidates",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            tasks {
+              id
+              wrapUpReason
+              wrapupReason
+              wrapUpCodeName
+              wrapupCodeName
+              wrapUpCode
+              wrapupCode
+              wrapUpReasonName
+              wrapupReasonName
+              disconnectReason
+              endReason
+              reason
+              disposition
+              dispositionCode
+              dispositionName
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "taskLegsNode",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            taskLegs { id }
+          }
+        }
+      `
+    },
+    {
+      name: "recordsNode",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            records { id }
+          }
+        }
+      `
+    }
+  ];
+
+  const results = [];
+
+  for (const item of queries) {
+    results.push(await runTaskLegDiscoveryQuery(item.name, item.query, variables));
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    from: variables.from,
+    to: variables.to,
+    note: "This probes taskLegDetails shape and wrapup/disconnect candidates. Failed variants are expected.",
+    results
+  });
+});
 
 app.listen(PORT, () => {
   console.log(`Secure widget backend listening on ${PORT}`);
