@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-taskleg-rootnode-debug-2026-05-19-v9";
+const BUILD_ID = "wxcc-taskleg-fieldprobe-fixed-2026-05-19-v10";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -2779,6 +2779,184 @@ app.get("/api/debug/taskleg-rootfield-schema", requireSession, requireWriteRole,
       error: err.message
     });
   }
+});
+
+
+app.get("/api/debug/taskleg-field-probe-v2", requireSession, requireWriteRole, async (req, res) => {
+  const now = Date.now();
+  const variables = {
+    from: now - 86400000,
+    to: now
+  };
+
+  const candidateFields = [
+    "id",
+    "taskId",
+    "status",
+    "channelType",
+    "createdTime",
+    "endedTime",
+    "origin",
+    "destination",
+    "direction",
+    "queueName",
+    "agentName",
+    "teamName",
+    "siteName",
+    "contactHandleType",
+    "abandonedType",
+    "wrapUpReason",
+    "wrapupReason",
+    "wrapUpCodeName",
+    "wrapupCodeName",
+    "wrapUpCode",
+    "wrapupCode",
+    "wrapUpReasonName",
+    "wrapupReasonName",
+    "disconnectReason",
+    "endReason",
+    "reason",
+    "disposition",
+    "dispositionCode",
+    "dispositionName",
+    "terminationReason",
+    "terminationType",
+    "queueDuration",
+    "connectedDuration",
+    "totalDuration",
+    "lastQueue",
+    "lastAgent",
+    "lastTeam"
+  ];
+
+  const results = [];
+
+  for (const fieldName of candidateFields) {
+    const query = `
+      query TaskLegFieldProbe($from: Long!, $to: Long!) {
+        taskLegDetails(from: $from, to: $to) {
+          taskLegs {
+            ${fieldName}
+          }
+        }
+      }
+    `;
+
+    try {
+      const result = await postSearchQuery(query, variables);
+      const taskLegs = result?.data?.taskLegDetails?.taskLegs || [];
+      results.push({
+        fieldName,
+        ok: true,
+        count: taskLegs.length,
+        sample: taskLegs.slice(0, 3)
+      });
+    } catch (err) {
+      results.push({
+        fieldName,
+        ok: false,
+        error: err.message
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    from: variables.from,
+    to: variables.to,
+    note: "Fixed probe: taskLegDetails.taskLegs is the valid root node.",
+    results
+  });
+});
+
+app.get("/api/debug/taskleg-sample-v2", requireSession, requireWriteRole, async (req, res) => {
+  const now = Date.now();
+  const variables = {
+    from: now - 86400000,
+    to: now
+  };
+
+  const queries = [
+    {
+      name: "minimal",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            taskLegs {
+              id
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "commonSupportedCandidates",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            taskLegs {
+              id
+              taskId
+              status
+              channelType
+              createdTime
+              endedTime
+              contactHandleType
+              abandonedType
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "wrapupCandidatesSmall1",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            taskLegs {
+              id
+              wrapUpReason
+              wrapupReason
+              wrapUpCodeName
+              wrapupCodeName
+            }
+          }
+        }
+      `
+    },
+    {
+      name: "wrapupCandidatesSmall2",
+      query: `
+        query TaskLegSample($from: Long!, $to: Long!) {
+          taskLegDetails(from: $from, to: $to) {
+            taskLegs {
+              id
+              disconnectReason
+              endReason
+              disposition
+              dispositionName
+            }
+          }
+        }
+      `
+    }
+  ];
+
+  const results = [];
+
+  for (const item of queries) {
+    results.push(await runTaskLegDiscoveryQuery(item.name, item.query, variables));
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    from: variables.from,
+    to: variables.to,
+    note: "Fixed sample: taskLegDetails.taskLegs is the valid root node.",
+    results
+  });
 });
 
 app.listen(PORT, () => {
