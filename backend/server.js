@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-termination-mapping-fix-2026-05-19-v12";
+const BUILD_ID = "wxcc-termination-rate-limit-fix-2026-05-19-v13";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -795,7 +795,7 @@ const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
 const WXCC_EVENT_WEBHOOK_SECRET = process.env.WXCC_EVENT_WEBHOOK_SECRET || "";
 const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 1200);
 const EVENT_REFRESH_RETRY_DELAYS_MS = String(
-  process.env.EVENT_REFRESH_RETRY_DELAYS_MS || "800,1500,3000,5000,8000,12000,18000"
+  process.env.EVENT_REFRESH_RETRY_DELAYS_MS || "1000,3000,7000,15000"
 )
   .split(",")
   .map(v => Number(v.trim()))
@@ -827,6 +827,12 @@ const WXCC_EVENT_TYPES_ENDPOINTS = String(
 const wallboardSseClients = new Set();
 let lastWxccEvent = null;
 let eventRefreshTimer = null;
+let taskLegTerminationCache = {
+  ts: 0,
+  map: new Map(),
+  inFlight: null
+};
+const TASK_LEG_TERMINATION_CACHE_TTL_MS = Number(process.env.TASK_LEG_TERMINATION_CACHE_TTL_MS || 15000);
 let lastTaskDetailsQueryVariant = "base";
 
 let wallboardDataCache = {
@@ -893,59 +899,78 @@ function getWrapupReasonFromTask(task) {
 }
 
 
-async function getTaskLegTerminationMap() {
+async function getTaskLegTerminationMap(force = false) {
   const now = Date.now();
 
-  const query = `
-    query TaskLegTerminationMap($from: Long!, $to: Long!) {
-      taskLegDetails(from: $from, to: $to) {
-        taskLegs {
-          id
-          taskId
-          status
-          abandonedType
-          terminationReason
-          createdTime
-          endedTime
+  if (!force && taskLegTerminationCache.map && now - taskLegTerminationCache.ts < TASK_LEG_TERMINATION_CACHE_TTL_MS) {
+    return taskLegTerminationCache.map;
+  }
+
+  if (!force && taskLegTerminationCache.inFlight) {
+    return taskLegTerminationCache.inFlight;
+  }
+
+  taskLegTerminationCache.inFlight = (async () => {
+    const query = `
+      query TaskLegTerminationMap($from: Long!, $to: Long!) {
+        taskLegDetails(from: $from, to: $to) {
+          taskLegs {
+            id
+            taskId
+            status
+            abandonedType
+            terminationReason
+            createdTime
+            endedTime
+          }
         }
       }
-    }
-  `;
+    `;
 
-  try {
-    const result = await postSearchQuery(query, {
-      from: now - 86400000,
-      to: now
-    });
+    try {
+      const result = await postSearchQuery(query, {
+        from: now - 86400000,
+        to: now
+      });
 
-    const taskLegs = result?.data?.taskLegDetails?.taskLegs || [];
-    const map = new Map();
+      const taskLegs = result?.data?.taskLegDetails?.taskLegs || [];
+      const map = new Map();
 
-    for (const leg of taskLegs) {
-      const taskId = leg?.taskId;
-      if (!taskId) continue;
+      for (const leg of taskLegs) {
+        const taskId = leg?.taskId;
+        if (!taskId) continue;
 
-      const existing = map.get(taskId);
-      const currentEnded = Number(leg.endedTime || 0);
-      const existingEnded = Number(existing?.endedTime || 0);
+        const existing = map.get(taskId);
+        const currentEnded = Number(leg.endedTime || 0);
+        const existingEnded = Number(existing?.endedTime || 0);
 
-      if (!existing || currentEnded >= existingEnded) {
-        map.set(taskId, {
-          terminationReason: leg.terminationReason || "",
-          abandonedType: leg.abandonedType || "",
-          taskLegId: leg.id || "",
-          taskLegStatus: leg.status || "",
-          taskLegCreatedTime: leg.createdTime || null,
-          taskLegEndedTime: leg.endedTime || null
-        });
+        if (!existing || currentEnded >= existingEnded) {
+          map.set(taskId, {
+            terminationReason: leg.terminationReason || "",
+            abandonedType: leg.abandonedType || "",
+            taskLegId: leg.id || "",
+            taskLegStatus: leg.status || "",
+            taskLegCreatedTime: leg.createdTime || null,
+            taskLegEndedTime: leg.endedTime || null
+          });
+        }
       }
-    }
 
-    return map;
-  } catch (err) {
-    console.warn("TaskLeg termination map query failed:", err.message);
-    return new Map();
-  }
+      taskLegTerminationCache.ts = Date.now();
+      taskLegTerminationCache.map = map;
+      return map;
+    } catch (err) {
+      console.warn("TaskLeg termination map query failed, using cached/empty map:", err.message);
+
+      // Important: Do not fail /api/wallboard if Search API rate-limits or errors.
+      // Return last good cache if present. This prevents the widget from getting stuck.
+      return taskLegTerminationCache.map || new Map();
+    } finally {
+      taskLegTerminationCache.inFlight = null;
+    }
+  })();
+
+  return taskLegTerminationCache.inFlight;
 }
 
 async function callWxccRestDiscovery(method, path, body = null) {
@@ -1677,7 +1702,9 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    taskLegTerminationCacheEnabled: true,
     taskLegTerminationEnabled: true,
+    taskLegTerminationCacheEnabled: true,
     analyzerReportDiscoveryEnabled: true,
     csrReportTodayDebugEnabled: true,
     searchSchemaDebugEnabled: true,
@@ -3152,6 +3179,19 @@ app.get("/api/debug/call-history-payload", requireSession, requireWriteRole, asy
       error: err.message
     });
   }
+});
+
+
+
+app.get("/api/debug/termination-cache", requireSession, requireWriteRole, async (req, res) => {
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    ttlMs: TASK_LEG_TERMINATION_CACHE_TTL_MS,
+    cacheAgeMs: taskLegTerminationCache.ts ? Date.now() - taskLegTerminationCache.ts : null,
+    cacheCount: taskLegTerminationCache.map ? taskLegTerminationCache.map.size : 0,
+    inFlight: !!taskLegTerminationCache.inFlight
+  });
 });
 
 
