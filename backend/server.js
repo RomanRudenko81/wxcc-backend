@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-termination-analyzer-debug-2026-05-19-v11";
+const BUILD_ID = "wxcc-termination-mapping-fix-2026-05-19-v12";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1123,27 +1123,35 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       wrapupReason: getWrapupReasonFromTask(task)
     })),
 
-    callHistoryList: callHistoryTasks.map(task => ({
-      id: task.id,
-      status: task.status,
-      caller: task.origin || "",
-      destination: task.destination || "",
-      queue: task?.lastQueue?.name || "",
-      firstQueue: task?.firstQueueName || "",
-      entryPoint: task?.lastEntryPoint?.name || "",
-      agent: task?.lastAgent?.name || "",
-      createdTime: task.createdTime || null,
-      endedTime: task.endedTime || null,
-      queueDuration: task.queueDuration || 0,
-      connectedDuration: task.connectedDuration || 0,
-      totalDuration: task.totalDuration || 0,
-      isActive: task.isActive === true,
-      isContactHandled: task.isContactHandled === true,
-      abandonedType: task.abandonedType || "",
-      contactHandleType: task.contactHandleType || "",
-      handleType: task.contactHandleType || task.abandonedType || "",
-      wrapupReason: getWrapupReasonFromTask(task)
-    }))
+    callHistoryList: callHistoryTasks.map(task => {
+      const taskId = task.id || task.taskId || "";
+      const termination = terminationByTaskId.get(taskId) || {};
+
+      return {
+        id: taskId,
+        status: task.status,
+        caller: task.origin || "",
+        destination: task.destination || "",
+        queue: task?.lastQueue?.name || "",
+        firstQueue: task?.firstQueueName || "",
+        entryPoint: task?.lastEntryPoint?.name || "",
+        agent: task?.lastAgent?.name || "",
+        createdTime: task.createdTime || null,
+        endedTime: task.endedTime || null,
+        queueDuration: task.queueDuration || 0,
+        connectedDuration: task.connectedDuration || 0,
+        totalDuration: task.totalDuration || 0,
+        isActive: task.isActive === true,
+        isContactHandled: task.isContactHandled === true,
+        abandonedType: task.abandonedType || "",
+        contactHandleType: task.contactHandleType || "",
+        handleType: task.contactHandleType || task.abandonedType || termination.abandonedType || "",
+        wrapupReason: getWrapupReasonFromTask(task),
+        terminationReason: termination.terminationReason || "",
+        taskLegId: termination.taskLegId || "",
+        taskLegStatus: termination.taskLegStatus || ""
+      };
+    })
   };
 }
 
@@ -3116,6 +3124,26 @@ app.get("/api/debug/taskleg-termination-sample", requireSession, requireWriteRol
         taskId,
         ...value
       }))
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err.message
+    });
+  }
+});
+
+
+
+app.get("/api/debug/call-history-payload", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const data = await buildWallboardPayload(req.session || {});
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      count: Array.isArray(data.callHistoryList) ? data.callHistoryList.length : 0,
+      sample: Array.isArray(data.callHistoryList) ? data.callHistoryList.slice(0, 10) : []
     });
   } catch (err) {
     res.status(500).json({
