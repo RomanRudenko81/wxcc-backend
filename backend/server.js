@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-tasklegdetails-debug-2026-05-19-v7";
+const BUILD_ID = "wxcc-tasklegdetails-light-debug-2026-05-19-v8";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -2435,65 +2435,11 @@ async function runTaskLegDiscoveryQuery(name, query, variables) {
 
 app.get("/api/debug/taskleg-schema", requireSession, requireWriteRole, async (req, res) => {
   const query = `
-    query TaskLegSchema {
-      taskLegList: __type(name: "TaskLegDetailsList") {
+    query TaskLegDetailsTypeOnly {
+      __type(name: "TaskLegDetails") {
         name
         kind
         fields {
-          name
-          type {
-            kind
-            name
-            ofType {
-              kind
-              name
-              ofType {
-                kind
-                name
-                ofType {
-                  kind
-                  name
-                  ofType {
-                    kind
-                    name
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      taskLeg: __type(name: "TaskLegDetails") {
-        name
-        kind
-        fields {
-          name
-          type {
-            kind
-            name
-            ofType {
-              kind
-              name
-              ofType {
-                kind
-                name
-                ofType {
-                  kind
-                  name
-                  ofType {
-                    kind
-                    name
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-      taskLegFilters: __type(name: "TaskLegDetailsFilters") {
-        name
-        kind
-        inputFields {
           name
           type {
             kind
@@ -2514,9 +2460,12 @@ app.get("/api/debug/taskleg-schema", requireSession, requireWriteRole, async (re
 
   try {
     const result = await postSearchQuery(query, {});
-    const listFields = result?.data?.taskLegList?.fields || [];
-    const detailFields = result?.data?.taskLeg?.fields || [];
-    const filterFields = result?.data?.taskLegFilters?.inputFields || [];
+    const fields = result?.data?.__type?.fields || [];
+
+    const normalizedFields = fields.map(field => ({
+      name: field.name,
+      type: unwrapGraphqlType(field.type)
+    }));
 
     const keywords = [
       "wrap", "reason", "disconnect", "disposition", "termination",
@@ -2524,12 +2473,7 @@ app.get("/api/debug/taskleg-schema", requireSession, requireWriteRole, async (re
       "leg", "contact", "code"
     ];
 
-    const normalizedDetailFields = detailFields.map(field => ({
-      name: field.name,
-      type: unwrapGraphqlType(field.type)
-    }));
-
-    const interestingFields = normalizedDetailFields.filter(field => {
+    const interestingFields = normalizedFields.filter(field => {
       const haystack = `${field.name} ${field.type}`.toLowerCase();
       return keywords.some(keyword => haystack.includes(keyword));
     });
@@ -2537,25 +2481,12 @@ app.get("/api/debug/taskleg-schema", requireSession, requireWriteRole, async (re
     res.json({
       ok: true,
       buildId: BUILD_ID,
-      listType: {
-        name: result?.data?.taskLegList?.name || "",
-        fields: listFields.map(field => ({
-          name: field.name,
-          type: unwrapGraphqlType(field.type)
-        }))
-      },
+      note: "Light introspection only. This avoids Cisco's anti-abuse protection for deep introspection.",
       detailType: {
-        name: result?.data?.taskLeg?.name || "",
-        fieldCount: normalizedDetailFields.length,
+        name: result?.data?.__type?.name || "TaskLegDetails",
+        fieldCount: normalizedFields.length,
         interestingFields,
-        allFields: normalizedDetailFields
-      },
-      filterType: {
-        name: result?.data?.taskLegFilters?.name || "",
-        fields: filterFields.map(field => ({
-          name: field.name,
-          type: unwrapGraphqlType(field.type)
-        }))
+        allFields: normalizedFields
       }
     });
   } catch (err) {
@@ -2614,26 +2545,14 @@ app.get("/api/debug/taskleg-sample", requireSession, requireWriteRole, async (re
       `
     },
     {
-      name: "wrapupCandidates",
+      name: "handleFields",
       query: `
         query TaskLegSample($from: Long!, $to: Long!) {
           taskLegDetails(from: $from, to: $to) {
             tasks {
               id
-              wrapUpReason
-              wrapupReason
-              wrapUpCodeName
-              wrapupCodeName
-              wrapUpCode
-              wrapupCode
-              wrapUpReasonName
-              wrapupReasonName
-              disconnectReason
-              endReason
-              reason
-              disposition
-              dispositionCode
-              dispositionName
+              contactHandleType
+              abandonedType
             }
           }
         }
@@ -2673,6 +2592,83 @@ app.get("/api/debug/taskleg-sample", requireSession, requireWriteRole, async (re
     from: variables.from,
     to: variables.to,
     note: "This probes taskLegDetails shape and wrapup/disconnect candidates. Failed variants are expected.",
+    results
+  });
+});
+
+
+app.get("/api/debug/taskleg-field-probe", requireSession, requireWriteRole, async (req, res) => {
+  const now = Date.now();
+  const variables = {
+    from: now - 86400000,
+    to: now
+  };
+
+  const candidateFields = [
+    "id",
+    "taskId",
+    "status",
+    "channelType",
+    "createdTime",
+    "endedTime",
+    "origin",
+    "destination",
+    "direction",
+    "queueName",
+    "agentName",
+    "contactHandleType",
+    "abandonedType",
+    "wrapUpReason",
+    "wrapupReason",
+    "wrapUpCodeName",
+    "wrapupCodeName",
+    "wrapUpCode",
+    "wrapupCode",
+    "wrapUpReasonName",
+    "wrapupReasonName",
+    "disconnectReason",
+    "endReason",
+    "reason",
+    "disposition",
+    "dispositionCode",
+    "dispositionName"
+  ];
+
+  const results = [];
+
+  for (const fieldName of candidateFields) {
+    const query = `
+      query TaskLegFieldProbe($from: Long!, $to: Long!) {
+        taskLegDetails(from: $from, to: $to) {
+          tasks {
+            ${fieldName}
+          }
+        }
+      }
+    `;
+
+    try {
+      const result = await postSearchQuery(query, variables);
+      const tasks = result?.data?.taskLegDetails?.tasks || [];
+      results.push({
+        fieldName,
+        ok: true,
+        count: tasks.length,
+        sample: tasks.slice(0, 3)
+      });
+    } catch (err) {
+      results.push({
+        fieldName,
+        ok: false,
+        error: err.message
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    note: "This probes TaskLegDetails fields one-by-one to find supported wrapup/disposition fields without heavy introspection.",
     results
   });
 });
