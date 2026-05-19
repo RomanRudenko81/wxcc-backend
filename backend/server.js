@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-taskleg-fieldprobe-fixed-2026-05-19-v10";
+const BUILD_ID = "wxcc-termination-analyzer-debug-2026-05-19-v11";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -892,6 +892,97 @@ function getWrapupReasonFromTask(task) {
   );
 }
 
+
+async function getTaskLegTerminationMap() {
+  const now = Date.now();
+
+  const query = `
+    query TaskLegTerminationMap($from: Long!, $to: Long!) {
+      taskLegDetails(from: $from, to: $to) {
+        taskLegs {
+          id
+          taskId
+          status
+          abandonedType
+          terminationReason
+          createdTime
+          endedTime
+        }
+      }
+    }
+  `;
+
+  try {
+    const result = await postSearchQuery(query, {
+      from: now - 86400000,
+      to: now
+    });
+
+    const taskLegs = result?.data?.taskLegDetails?.taskLegs || [];
+    const map = new Map();
+
+    for (const leg of taskLegs) {
+      const taskId = leg?.taskId;
+      if (!taskId) continue;
+
+      const existing = map.get(taskId);
+      const currentEnded = Number(leg.endedTime || 0);
+      const existingEnded = Number(existing?.endedTime || 0);
+
+      if (!existing || currentEnded >= existingEnded) {
+        map.set(taskId, {
+          terminationReason: leg.terminationReason || "",
+          abandonedType: leg.abandonedType || "",
+          taskLegId: leg.id || "",
+          taskLegStatus: leg.status || "",
+          taskLegCreatedTime: leg.createdTime || null,
+          taskLegEndedTime: leg.endedTime || null
+        });
+      }
+    }
+
+    return map;
+  } catch (err) {
+    console.warn("TaskLeg termination map query failed:", err.message);
+    return new Map();
+  }
+}
+
+async function callWxccRestDiscovery(method, path, body = null) {
+  const token = await getValidServiceToken();
+
+  const endpoint = /^https?:\/\//i.test(path)
+    ? path
+    : `${WXCC_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+
+  const response = await fetch(endpoint, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {})
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
+  });
+
+  const text = await response.text();
+
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    endpoint,
+    body: json,
+    text: json ? undefined : text
+  };
+}
+
 async function buildWallboardPayload(session, forceRefresh = false) {
   const access = await getAllowedQueuesForSession(session);
   const allowedQueues = access.allowedQueues || [];
@@ -925,6 +1016,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
   const callHistoryTasks = allowedQueueTasks
     .slice()
     .sort((a, b) => Number(b.createdTime || 0) - Number(a.createdTime || 0));
+
+  const terminationByTaskId = await getTaskLegTerminationMap();
 
   const avgWaitSeconds =
     allowedQueueTasks.length > 0
@@ -1010,7 +1103,10 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       agent: task?.lastAgent?.name || "",
       queueDuration: task.queueDuration || 0,
       connectedDuration: task.connectedDuration || 0,
-      wrapupReason: getWrapupReasonFromTask(task)
+      wrapupReason: getWrapupReasonFromTask(task),
+      terminationReason: terminationByTaskId.get(task.id)?.terminationReason || "",
+      taskLegId: terminationByTaskId.get(task.id)?.taskLegId || "",
+      taskLegStatus: terminationByTaskId.get(task.id)?.taskLegStatus || ""
     })),
 
     waitingTaskList: waitingTasks.map(task => ({
@@ -1573,6 +1669,8 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    taskLegTerminationEnabled: true,
+    analyzerReportDiscoveryEnabled: true,
     csrReportTodayDebugEnabled: true,
     searchSchemaDebugEnabled: true,
     eventOnlyRealtime: true,
@@ -2958,6 +3056,76 @@ app.get("/api/debug/taskleg-sample-v2", requireSession, requireWriteRole, async 
     results
   });
 });
+
+
+app.get("/api/debug/analyzer-report-discovery", requireSession, requireWriteRole, async (req, res) => {
+  const candidates = [
+    "/v1/reports",
+    "/v1/report",
+    "/v1/reports/definitions",
+    "/v1/report-definitions",
+    "/v1/analyzer/reports",
+    "/v1/analyzer/report-definitions",
+    "/v1/analyzer/stock-reports",
+    "/v1/stock-reports",
+    "/v1/custom-reports",
+    "/v1/reporting/reports",
+    "/v1/reporting/report-definitions",
+    "/v1/reporting/analyzer/reports"
+  ];
+
+  const results = [];
+
+  for (const path of candidates) {
+    try {
+      const result = await callWxccRestDiscovery("GET", path);
+      results.push({
+        path,
+        ok: result.ok,
+        status: result.status,
+        endpoint: result.endpoint,
+        body: result.body,
+        text: result.text
+      });
+    } catch (err) {
+      results.push({
+        path,
+        ok: false,
+        error: err.message
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    note: "This probes likely REST endpoints for Analyzer/Report definitions. We are looking for CSR Report or Agent WrapUp Auxiliary.",
+    results
+  });
+});
+
+app.get("/api/debug/taskleg-termination-sample", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const map = await getTaskLegTerminationMap();
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      count: map.size,
+      sample: Array.from(map.entries()).slice(0, 10).map(([taskId, value]) => ({
+        taskId,
+        ...value
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err.message
+    });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Secure widget backend listening on ${PORT}`);
