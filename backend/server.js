@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-tasklegdetails-light-debug-2026-05-19-v8";
+const BUILD_ID = "wxcc-taskleg-rootnode-debug-2026-05-19-v9";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -2671,6 +2671,114 @@ app.get("/api/debug/taskleg-field-probe", requireSession, requireWriteRole, asyn
     note: "This probes TaskLegDetails fields one-by-one to find supported wrapup/disposition fields without heavy introspection.",
     results
   });
+});
+
+
+app.get("/api/debug/taskleg-rootnode-probe", requireSession, requireWriteRole, async (req, res) => {
+  const now = Date.now();
+  const variables = {
+    from: now - 86400000,
+    to: now
+  };
+
+  const candidateNodes = [
+    "data",
+    "items",
+    "records",
+    "results",
+    "nodes",
+    "edges",
+    "taskLegs",
+    "legs",
+    "taskLegDetails",
+    "taskLeg",
+    "rows",
+    "list",
+    "content"
+  ];
+
+  const results = [];
+
+  for (const nodeName of candidateNodes) {
+    const query = `
+      query TaskLegRootNodeProbe($from: Long!, $to: Long!) {
+        taskLegDetails(from: $from, to: $to) {
+          ${nodeName} {
+            __typename
+          }
+        }
+      }
+    `;
+
+    try {
+      const result = await postSearchQuery(query, variables);
+      results.push({
+        nodeName,
+        ok: true,
+        result
+      });
+    } catch (err) {
+      results.push({
+        nodeName,
+        ok: false,
+        error: err.message
+      });
+    }
+  }
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    from: variables.from,
+    to: variables.to,
+    note: "This probes possible child/root nodes below taskLegDetails. We need the node that is not FieldUndefined.",
+    results
+  });
+});
+
+app.get("/api/debug/taskleg-rootfield-schema", requireSession, requireWriteRole, async (req, res) => {
+  const query = `
+    query TaskLegListTypeOnly {
+      __type(name: "TaskLegDetailsList") {
+        name
+        fields {
+          name
+          type {
+            kind
+            name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const result = await postSearchQuery(query, {});
+    const fields = result?.data?.__type?.fields || [];
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      fields: fields.map(field => ({
+        name: field.name,
+        type: unwrapGraphqlType(field.type)
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err.message
+    });
+  }
 });
 
 app.listen(PORT, () => {
