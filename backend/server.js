@@ -48,7 +48,55 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-wallboard-500-resilience-fix-2026-05-19-v22";
+const BUILD_ID = "wxcc-sse-event-deep-debug-2026-05-19-v23";
+
+const SSE_DEBUG_MAX = Number(process.env.SSE_DEBUG_MAX || 200);
+const sseDebugEvents = [];
+const sseDebugStats = {
+  startedAt: Date.now(),
+  wxccEventsReceived: 0,
+  wxccEventsAccepted: 0,
+  wxccEventsRejected: 0,
+  wallboardStreamConnections: 0,
+  wallboardStreamDisconnects: 0,
+  wallboardMessagesSent: 0,
+  wallboardBuildErrors: 0,
+  eventRefreshScheduled: 0,
+  eventRefreshCompleted: 0
+};
+
+function recordSseDebug(type, details = {}) {
+  const item = {
+    ts: Date.now(),
+    iso: new Date().toISOString(),
+    type,
+    ...details
+  };
+
+  sseDebugEvents.push(item);
+  while (sseDebugEvents.length > SSE_DEBUG_MAX) {
+    sseDebugEvents.shift();
+  }
+
+  return item;
+}
+
+function summarizeEventBody(body) {
+  if (!body || typeof body !== "object") {
+    return { rawType: typeof body, raw: String(body || "").slice(0, 500) };
+  }
+
+  return {
+    keys: Object.keys(body),
+    eventType: body.eventType || body.type || body.event || body.name || "",
+    taskId: body.taskId || body.task?.id || body.data?.taskId || body.data?.task?.id || "",
+    agentId: body.agentId || body.agent?.id || body.data?.agentId || body.data?.agent?.id || "",
+    orgId: body.orgId || body.organizationId || body.data?.orgId || body.data?.organizationId || "",
+    trackingId: body.trackingId || body.data?.trackingId || "",
+    sample: JSON.stringify(body).slice(0, 1000)
+  };
+}
+
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1338,6 +1386,8 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
     res.json(payload);
   } catch (err) {
     lastWallboardBuildError = err?.message || String(err);
+    sseDebugStats.wallboardBuildErrors += 1;
+    recordSseDebug("wallboard-stream-build-error", { reason, error: lastWallboardBuildError });
 
     // Important resilience behavior:
     // do not break the widget on a transient WXCC/Search 500/429 after call accept.
@@ -1369,6 +1419,15 @@ async function sendWallboardPayload(res, session, reason = "stream") {
     lastGoodWallboardPayload = payload;
     lastGoodWallboardPayloadTs = Date.now();
     lastWallboardBuildError = "";
+    sseDebugStats.wallboardMessagesSent += 1;
+    recordSseDebug("wallboard-stream-send", {
+      reason,
+      agents: Array.isArray(payload.agents) ? payload.agents.length : null,
+      active: Array.isArray(payload.taskList) ? payload.taskList.length : null,
+      waiting: Array.isArray(payload.waitingTaskList) ? payload.waitingTaskList.length : null,
+      history: Array.isArray(payload.callHistoryList) ? payload.callHistoryList.length : null,
+      stale: payload.stale === true
+    });
     res.write(`event: wallboard\n`);
     res.write(`data: ${JSON.stringify(payload)}\n\n`);
   } catch (err) {
@@ -1395,6 +1454,18 @@ async function sendWallboardPayload(res, session, reason = "stream") {
 }
 
 app.get("/api/wallboard/stream", async (req, res) => {
+  sseDebugStats.wallboardStreamConnections += 1;
+  recordSseDebug("wallboard-stream-connect", {
+    sessionTokenPresent: !!(req.query?.token),
+    userAgent: req.headers["user-agent"] || "",
+    accept: req.headers["accept"] || ""
+  });
+  req.on("close", () => {
+    sseDebugStats.wallboardStreamDisconnects += 1;
+    recordSseDebug("wallboard-stream-disconnect", { reason: "request-close" });
+  });
+
+
   const session = getSessionFromRequest(req);
 
   if (!session) {
@@ -1452,6 +1523,22 @@ app.get("/api/wallboard/stream", async (req, res) => {
     if (fallbackTimer) clearInterval(fallbackTimer);
     clearInterval(heartbeatTimer);
   });
+});
+
+
+app.use("/api/wxcc/events", (req, res, next) => {
+  sseDebugStats.wxccEventsReceived += 1;
+  recordSseDebug("wxcc-webhook-inbound", {
+    method: req.method,
+    path: req.originalUrl || req.url,
+    headers: {
+      userAgent: req.headers["user-agent"] || "",
+      contentType: req.headers["content-type"] || "",
+      xTrackingId: req.headers["trackingid"] || req.headers["x-tracking-id"] || ""
+    },
+    body: summarizeEventBody(req.body)
+  });
+  next();
 });
 
 app.post("/api/wxcc/events", (req, res) => {
@@ -1817,6 +1904,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    sseEventDeepDebug: true,
     wallboard500ResilienceFix: true,
     focusResumeRefreshFix: true,
     historyConnectedStaleFix: true,
@@ -3353,6 +3441,37 @@ app.get("/api/debug/wallboard-cache", requireSession, requireWriteRole, async (r
         }
       : null
   });
+});
+
+
+
+app.get("/api/debug/sse-events", requireSession, requireWriteRole, async (req, res) => {
+  const limit = Math.max(1, Math.min(Number(req.query.limit || 80), SSE_DEBUG_MAX));
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    now: Date.now(),
+    stats: {
+      ...sseDebugStats,
+      uptimeMs: Date.now() - sseDebugStats.startedAt,
+      activeSessions: typeof sessions !== "undefined" && sessions?.size !== undefined ? sessions.size : undefined
+    },
+    lastWallboardBuildError: typeof lastWallboardBuildError !== "undefined" ? lastWallboardBuildError : "",
+    lastGoodWallboardPayloadAgeMs:
+      typeof lastGoodWallboardPayloadTs !== "undefined" && lastGoodWallboardPayloadTs
+        ? Date.now() - lastGoodWallboardPayloadTs
+        : null,
+    events: sseDebugEvents.slice(-limit)
+  });
+});
+
+app.post("/api/debug/sse-events/clear", requireSession, requireWriteRole, async (req, res) => {
+  sseDebugEvents.length = 0;
+  Object.keys(sseDebugStats).forEach(key => {
+    if (key === "startedAt") sseDebugStats[key] = Date.now();
+    else sseDebugStats[key] = 0;
+  });
+  res.json({ ok: true, buildId: BUILD_ID });
 });
 
 
