@@ -48,56 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-realtime-sse-initial-payload-fix-2026-05-20-v28";
-
-const SSE_DEBUG_MAX = Number(process.env.SSE_DEBUG_MAX || 200);
-const sseDebugEvents = [];
-const webhookEventTypeCounters = {};
-const sseDebugStats = {
-  startedAt: Date.now(),
-  wxccEventsReceived: 0,
-  wxccEventsAccepted: 0,
-  wxccEventsRejected: 0,
-  wallboardStreamConnections: 0,
-  wallboardStreamDisconnects: 0,
-  wallboardMessagesSent: 0,
-  wallboardBuildErrors: 0,
-  eventRefreshScheduled: 0,
-  eventRefreshCompleted: 0
-};
-
-function recordSseDebug(type, details = {}) {
-  const item = {
-    ts: Date.now(),
-    iso: new Date().toISOString(),
-    type,
-    ...details
-  };
-
-  sseDebugEvents.push(item);
-  while (sseDebugEvents.length > SSE_DEBUG_MAX) {
-    sseDebugEvents.shift();
-  }
-
-  return item;
-}
-
-function summarizeEventBody(body) {
-  if (!body || typeof body !== "object") {
-    return { rawType: typeof body, raw: String(body || "").slice(0, 500) };
-  }
-
-  return {
-    keys: Object.keys(body),
-    eventType: body.eventType || body.type || body.event || body.name || "",
-    taskId: body.taskId || body.task?.id || body.data?.taskId || body.data?.task?.id || "",
-    agentId: body.agentId || body.agent?.id || body.data?.agentId || body.data?.agent?.id || "",
-    orgId: body.orgId || body.organizationId || body.data?.orgId || body.data?.organizationId || "",
-    trackingId: body.trackingId || body.data?.trackingId || "",
-    sample: JSON.stringify(body).slice(0, 1000)
-  };
-}
-
+const BUILD_ID = "wxcc-stable-rollback-baseline-2026-05-20-v29";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -882,10 +833,6 @@ let taskLegTerminationCache = {
   inFlight: null
 };
 const TASK_LEG_TERMINATION_CACHE_TTL_MS = Number(process.env.TASK_LEG_TERMINATION_CACHE_TTL_MS || 15000);
-
-let lastGoodWallboardPayload = null;
-let lastGoodWallboardPayloadTs = 0;
-let lastWallboardBuildError = "";
 let lastTaskDetailsQueryVariant = "base";
 
 let wallboardDataCache = {
@@ -1186,25 +1133,6 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       available: availableAgents.length
     },
 
-    agents: agents.map(agent => {
-      const channel = getPrimaryChannelInfo(agent);
-
-      return {
-        name: agent.agentName || "",
-        login: agent.userLoginId || "",
-        state: getDisplayState(agent),
-        currentState: channel?.currentState || "",
-        idleCodeName: channel?.idleCodeName || "",
-        teamId: agent.teamId || "",
-        team: agent.teamName || "",
-        site: agent.siteName || "",
-        startTime: agent.startTime || null,
-        lastActivityTime: channel?.lastActivityTime || null
-      };
-    }),
-    agentsAliasAdded: true,
-
-
     agentList: agents.map(agent => {
       const channel = getPrimaryChannelInfo(agent);
 
@@ -1281,21 +1209,7 @@ async function buildWallboardPayload(session, forceRefresh = false) {
         queueDuration: task.queueDuration || 0,
         connectedDuration: task.connectedDuration || 0,
         totalDuration: task.totalDuration || 0,
-        liveDurationSeconds: (() => {
-          const totalMs = Number(task.totalDuration || 0);
-          const createdMs = Number(task.createdTime || 0);
-          const endedMs = Number(task.endedTime || 0);
-
-          if (totalMs > 0) return Math.round(totalMs / 1000);
-          if (createdMs > 0 && endedMs > 0 && endedMs >= createdMs) {
-            return Math.round((endedMs - createdMs) / 1000);
-          }
-          if (String(task.status || "").toLowerCase() === "connected" && createdMs > 0) {
-            return Math.max(0, Math.floor((Date.now() - createdMs) / 1000));
-          }
-          return 0;
-        })(),
-        durationSourcePolicy: "call-history-total-time-in-wxcc",
+        liveDurationSeconds: getTaskDurationSeconds(task),
         isActive: task.isActive === true,
         isContactHandled: task.isContactHandled === true,
         abandonedType: task.abandonedType || "",
@@ -1398,218 +1312,75 @@ function isWebhookSecretValid(req) {
 
 app.get("/api/wallboard", requireSession, async (req, res) => {
   try {
-    const payload = await buildWallboardPayload(req.session || {});
-    lastGoodWallboardPayload = payload;
-    lastGoodWallboardPayloadTs = Date.now();
-    lastWallboardBuildError = "";
-
+    const payload = await buildWallboardPayload(req.session, false);
     res.json(payload);
   } catch (err) {
-    lastWallboardBuildError = err?.message || String(err);
-    sseDebugStats.wallboardBuildErrors += 1;
-    recordSseDebug("wallboard-stream-build-error", { reason, error: lastWallboardBuildError });
-
-    // Important resilience behavior:
-    // do not break the widget on a transient WXCC/Search 500/429 after call accept.
-    // Return last known good wallboard payload for up to 5 minutes.
-    if (lastGoodWallboardPayload && Date.now() - lastGoodWallboardPayloadTs < 300000) {
-      return res.json({
-        ...lastGoodWallboardPayload,
-        ok: true,
-        stale: true,
-        staleReason: "wallboard-build-failed",
-        staleAgeMs: Date.now() - lastGoodWallboardPayloadTs,
-        lastError: lastWallboardBuildError
-      });
-    }
-
     res.status(500).json({
       ok: false,
-      buildId: BUILD_ID,
-      error: lastWallboardBuildError
+      error: err.message
     });
   }
 });
 
 
+app.get("/api/wallboard/stream", async (req, res) => {
+  const session = getSessionFromRequest(req);
 
-async function sendWallboardPayload(res, session, reason = "stream") {
-  try {
-    const payload = await buildWallboardPayload(session || {});
-    lastGoodWallboardPayload = payload;
-    lastGoodWallboardPayloadTs = Date.now();
-    lastWallboardBuildError = "";
-    sseDebugStats.wallboardMessagesSent += 1;
-    recordSseDebug("wallboard-stream-send", {
-      reason,
-      agents: Array.isArray(payload.agents) ? payload.agents.length : null,
-      active: Array.isArray(payload.taskList) ? payload.taskList.length : null,
-      waiting: Array.isArray(payload.waitingTaskList) ? payload.waitingTaskList.length : null,
-      history: Array.isArray(payload.callHistoryList) ? payload.callHistoryList.length : null,
-      stale: payload.stale === true
+  if (!session) {
+    return res.status(401).json({
+      error: "Invalid or expired session"
     });
-    res.write(`event: wallboard\n`);
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  } catch (err) {
-    lastWallboardBuildError = err?.message || String(err);
-
-    if (lastGoodWallboardPayload && Date.now() - lastGoodWallboardPayloadTs < 300000) {
-      const stalePayload = {
-        ...lastGoodWallboardPayload,
-        ok: true,
-        stale: true,
-        staleReason: `wallboard-stream-build-failed:${reason}`,
-        staleAgeMs: Date.now() - lastGoodWallboardPayloadTs,
-        lastError: lastWallboardBuildError
-      };
-
-      res.write(`event: wallboard\n`);
-      res.write(`data: ${JSON.stringify(stalePayload)}\n\n`);
-      return;
-    }
-
-    res.write(`event: wallboard-error\n`);
-    res.write(`data: ${JSON.stringify({ ok: false, buildId: BUILD_ID, error: lastWallboardBuildError, reason })}\n\n`);
   }
-}
 
-app.get("/api/wallboard/stream", requireSession, async (req, res) => {
-  sseDebugStats.wallboardStreamConnections += 1;
-  recordSseDebug("wallboard-stream-connect", {
-    sessionTokenPresent: !!(req.query?.token),
-    userAgent: req.headers["user-agent"] || "",
-    accept: req.headers["accept"] || ""
+  req.session = session;
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no"
   });
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
 
   if (typeof res.flushHeaders === "function") {
     res.flushHeaders();
   }
 
-  const sendEvent = (eventName, data = {}) => {
-    try {
-      res.write(`event: ${eventName}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    } catch (err) {
-      recordSseDebug("wallboard-stream-write-error", {
-        eventName,
-        error: err?.message || String(err)
-      });
-    }
+  const client = {
+    id: crypto.randomUUID(),
+    session,
+    res,
+    lastPayload: ""
   };
 
-  sendEvent("ready", {
+  wallboardSseClients.add(client);
+
+  writeSseEvent(res, "ready", {
     ok: true,
-    buildId: BUILD_ID,
-    ts: Date.now()
+    mode: WALLBOARD_FALLBACK_POLLING_ENABLED ? "event-bridge-with-fallback" : "event-only",
+    generatedAt: new Date().toISOString(),
+    fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
+    fallbackRefreshMs: WALLBOARD_FALLBACK_POLLING_ENABLED ? WALLBOARD_DATA_CACHE_TTL_MS : null,
+    eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS
   });
 
-  let closed = false;
-  let heartbeatHandle = null;
+  // Initial load once when the widget connects.
+  await pushWallboardUpdateToClient(client, true);
+
+  const fallbackTimer = WALLBOARD_FALLBACK_POLLING_ENABLED
+    ? setInterval(() => {
+        pushWallboardUpdateToClient(client, false);
+      }, WALLBOARD_DATA_CACHE_TTL_MS)
+    : null;
+
+  const heartbeatTimer = setInterval(() => {
+    res.write(`: heartbeat ${Date.now()}\n\n`);
+  }, SSE_HEARTBEAT_MS);
 
   req.on("close", () => {
-    closed = true;
-    sseDebugStats.wallboardStreamDisconnects += 1;
-    recordSseDebug("wallboard-stream-disconnect", { reason: "request-close" });
-
-    if (heartbeatHandle) clearInterval(heartbeatHandle);
+    wallboardSseClients.delete(client);
+    if (fallbackTimer) clearInterval(fallbackTimer);
+    clearInterval(heartbeatTimer);
   });
-
-  const sendWallboardNow = async (reason = "stream") => {
-    if (closed) return;
-
-    try {
-      const payload = await buildWallboardPayload(req.session || {});
-      lastGoodWallboardPayload = payload;
-      lastGoodWallboardPayloadTs = Date.now();
-      lastWallboardBuildError = "";
-
-      sseDebugStats.wallboardMessagesSent += 1;
-      recordSseDebug("wallboard-stream-send", {
-        reason,
-        agents: Array.isArray(payload.agents) ? payload.agents.length : null,
-        agentList: Array.isArray(payload.agentList) ? payload.agentList.length : null,
-        active: Array.isArray(payload.taskList) ? payload.taskList.length : null,
-        waiting: Array.isArray(payload.waitingTaskList) ? payload.waitingTaskList.length : null,
-        history: Array.isArray(payload.callHistoryList) ? payload.callHistoryList.length : null,
-        stale: false
-      });
-
-      sendEvent("wallboard", payload);
-    } catch (err) {
-      lastWallboardBuildError = err?.message || String(err);
-      sseDebugStats.wallboardBuildErrors += 1;
-
-      recordSseDebug("wallboard-stream-build-error", {
-        reason,
-        error: lastWallboardBuildError
-      });
-
-      if (lastGoodWallboardPayload && Date.now() - lastGoodWallboardPayloadTs < 300000) {
-        const stalePayload = {
-          ...lastGoodWallboardPayload,
-          ok: true,
-          stale: true,
-          staleReason: `wallboard-stream-build-failed:${reason}`,
-          staleAgeMs: Date.now() - lastGoodWallboardPayloadTs,
-          lastError: lastWallboardBuildError
-        };
-
-        sseDebugStats.wallboardMessagesSent += 1;
-        recordSseDebug("wallboard-stream-send", {
-          reason,
-          stale: true,
-          staleAgeMs: stalePayload.staleAgeMs,
-          error: lastWallboardBuildError
-        });
-
-        sendEvent("wallboard", stalePayload);
-      } else {
-        sendEvent("wallboard-error", {
-          ok: false,
-          buildId: BUILD_ID,
-          reason,
-          error: lastWallboardBuildError
-        });
-      }
-    }
-  };
-
-  heartbeatHandle = setInterval(() => {
-    if (closed) return;
-
-    sendEvent("heartbeat", {
-      ok: true,
-      ts: Date.now(),
-      buildId: BUILD_ID
-    });
-  }, 25000);
-
-  await sendWallboardNow("initial-connect");
-  setTimeout(() => sendWallboardNow("initial-followup"), 1500);
-});
-
-
-app.use("/api/wxcc/events", (req, res, next) => {
-  sseDebugStats.wxccEventsReceived += 1;
-  const eventSummary = summarizeEventBody(req.body);
-  const eventCounterKey = eventSummary.eventType || "unknown";
-  webhookEventTypeCounters[eventCounterKey] = (webhookEventTypeCounters[eventCounterKey] || 0) + 1;
-  recordSseDebug("wxcc-webhook-inbound", {
-    method: req.method,
-    path: req.originalUrl || req.url,
-    headers: {
-      userAgent: req.headers["user-agent"] || "",
-      contentType: req.headers["content-type"] || "",
-      xTrackingId: req.headers["trackingid"] || req.headers["x-tracking-id"] || ""
-    },
-    body: eventSummary
-  });
-  next();
 });
 
 app.post("/api/wxcc/events", (req, res) => {
@@ -1975,17 +1746,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
-    realtimeSseInitialPayloadFix: true,
-    subscriptionCleanupFullV27: true,
-    subscriptionDebugSafeFix: true,
-    comprehensiveEventWatchdogDebug: true,
-    agentsWebhookDiagnosticsFix: true,
-    sseEventDeepDebug: true,
-    wallboard500ResilienceFix: true,
-    focusResumeRefreshFix: true,
-    historyConnectedStaleFix: true,
-    sseWatchdogStabilityFix: true,
-    durationPolicyStableFix: true,
+    stableRollbackBaselineV29: true,
     frontendTimerHistoryCacheFix: true,
     clientLiveTimerEnabled: true,
     taskLegTerminationCacheEnabled: true,
@@ -3496,445 +3257,6 @@ app.get("/api/debug/live-duration-payload", requireSession, requireWriteRole, as
       ok: false,
       buildId: BUILD_ID,
       error: err.message
-    });
-  }
-});
-
-
-
-app.get("/api/debug/wallboard-cache", requireSession, requireWriteRole, async (req, res) => {
-  res.json({
-    ok: true,
-    buildId: BUILD_ID,
-    hasCache: !!lastGoodWallboardPayload,
-    cacheAgeMs: lastGoodWallboardPayloadTs ? Date.now() - lastGoodWallboardPayloadTs : null,
-    lastError: lastWallboardBuildError || "",
-    sample: lastGoodWallboardPayload
-      ? {
-          topLevelKeys: Object.keys(lastGoodWallboardPayload),
-          agents: Array.isArray(lastGoodWallboardPayload.agents) ? lastGoodWallboardPayload.agents.length : null,
-          agentList: Array.isArray(lastGoodWallboardPayload.agentList) ? lastGoodWallboardPayload.agentList.length : null,
-          agentStateList: Array.isArray(lastGoodWallboardPayload.agentStateList) ? lastGoodWallboardPayload.agentStateList.length : null,
-          taskList: Array.isArray(lastGoodWallboardPayload.taskList) ? lastGoodWallboardPayload.taskList.length : null,
-          waitingTaskList: Array.isArray(lastGoodWallboardPayload.waitingTaskList) ? lastGoodWallboardPayload.waitingTaskList.length : null,
-          callHistoryList: Array.isArray(lastGoodWallboardPayload.callHistoryList) ? lastGoodWallboardPayload.callHistoryList.length : null,
-          firstAgent:
-            Array.isArray(lastGoodWallboardPayload.agents) && lastGoodWallboardPayload.agents.length
-              ? lastGoodWallboardPayload.agents[0]
-              : Array.isArray(lastGoodWallboardPayload.agentList) && lastGoodWallboardPayload.agentList.length
-                ? lastGoodWallboardPayload.agentList[0]
-                : null,
-          firstTask:
-            Array.isArray(lastGoodWallboardPayload.taskList) && lastGoodWallboardPayload.taskList.length
-              ? lastGoodWallboardPayload.taskList[0]
-              : null,
-          firstHistory:
-            Array.isArray(lastGoodWallboardPayload.callHistoryList) && lastGoodWallboardPayload.callHistoryList.length
-              ? lastGoodWallboardPayload.callHistoryList[0]
-              : null
-        }
-      : null
-  });
-});
-
-
-
-app.get("/api/debug/sse-events", requireSession, requireWriteRole, async (req, res) => {
-  const limit = Math.max(1, Math.min(Number(req.query.limit || 80), SSE_DEBUG_MAX));
-  res.json({
-    ok: true,
-    buildId: BUILD_ID,
-    now: Date.now(),
-    stats: {
-      ...sseDebugStats,
-      uptimeMs: Date.now() - sseDebugStats.startedAt,
-      activeSessions: typeof sessions !== "undefined" && sessions?.size !== undefined ? sessions.size : undefined
-    },
-    lastWallboardBuildError: typeof lastWallboardBuildError !== "undefined" ? lastWallboardBuildError : "",
-    lastGoodWallboardPayloadAgeMs:
-      typeof lastGoodWallboardPayloadTs !== "undefined" && lastGoodWallboardPayloadTs
-        ? Date.now() - lastGoodWallboardPayloadTs
-        : null,
-    webhookEventTypeCounters,
-    events: sseDebugEvents.slice(-limit)
-  });
-});
-
-app.post("/api/debug/sse-events/clear", requireSession, requireWriteRole, async (req, res) => {
-  sseDebugEvents.length = 0;
-  Object.keys(sseDebugStats).forEach(key => {
-    if (key === "startedAt") sseDebugStats[key] = Date.now();
-    else sseDebugStats[key] = 0;
-  });
-  res.json({ ok: true, buildId: BUILD_ID });
-});
-
-
-
-app.get("/api/debug/wallboard-shape", requireSession, requireWriteRole, async (req, res) => {
-  try {
-    const payload = await buildWallboardPayload(req.session || {});
-
-    res.json({
-      ok: true,
-      buildId: BUILD_ID,
-      topLevelKeys: Object.keys(payload || {}),
-      counts: {
-        agents: Array.isArray(payload?.agents) ? payload.agents.length : null,
-        agentList: Array.isArray(payload?.agentList) ? payload.agentList.length : null,
-        agentStateList: Array.isArray(payload?.agentStateList) ? payload.agentStateList.length : null,
-        taskList: Array.isArray(payload?.taskList) ? payload.taskList.length : null,
-        waitingTaskList: Array.isArray(payload?.waitingTaskList) ? payload.waitingTaskList.length : null,
-        callHistoryList: Array.isArray(payload?.callHistoryList) ? payload.callHistoryList.length : null
-      },
-      samples: {
-        agent:
-          Array.isArray(payload?.agents) && payload.agents.length
-            ? payload.agents[0]
-            : Array.isArray(payload?.agentList) && payload.agentList.length
-              ? payload.agentList[0]
-              : null,
-        task: Array.isArray(payload?.taskList) && payload.taskList.length ? payload.taskList[0] : null,
-        history: Array.isArray(payload?.callHistoryList) && payload.callHistoryList.length ? payload.callHistoryList[0] : null
-      }
-    });
-  } catch (err) {
-    res.status(500).json({
-      ok: false,
-      buildId: BUILD_ID,
-      error: err?.message || String(err)
-    });
-  }
-});
-
-
-
-app.get("/api/debug/wxcc-subscriptions-live", requireSession, requireWriteRole, async (req, res) => {
-  const baseUrl =
-    typeof WXCC_BASE_URL !== "undefined" && WXCC_BASE_URL
-      ? WXCC_BASE_URL
-      : "https://api.wxcc-eu2.cisco.com";
-
-  const endpoint = `${baseUrl}/v1/subscriptions`;
-  const targetUrl = "https://wxcc-backend.onrender.com/api/wxcc/events";
-
-  try {
-    let token = "";
-
-    try {
-      token = await getValidServiceToken();
-    } catch (tokenErr) {
-      return res.status(200).json({
-        ok: false,
-        buildId: BUILD_ID,
-        stage: "token",
-        endpoint,
-        targetUrl,
-        error: tokenErr?.message || String(tokenErr),
-        hint: "Token retrieval failed before calling WXCC subscriptions API."
-      });
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12000);
-
-    let response;
-    try {
-      response = await fetch(endpoint, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json"
-        },
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    const text = await response.text();
-    let body = null;
-    try {
-      body = text ? JSON.parse(text) : null;
-    } catch {
-      body = text;
-    }
-
-    const data = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
-    const matching = data.filter(item => String(item.destinationUrl || "").includes("/api/wxcc/events"));
-
-    res.status(200).json({
-      ok: response.ok,
-      buildId: BUILD_ID,
-      status: response.status,
-      endpoint,
-      targetUrl,
-      subscriptionCount: data.length,
-      matchingCount: matching.length,
-      matching,
-      body
-    });
-  } catch (err) {
-    res.status(200).json({
-      ok: false,
-      buildId: BUILD_ID,
-      stage: "fetch",
-      endpoint,
-      targetUrl,
-      error: err?.message || String(err),
-      hint: "The debug endpoint failed safely. Render should no longer return 502 for this route."
-    });
-  }
-});
-
-app.get("/api/wxcc/events", (req, res) => {
-  // Public diagnostic only: proves the route exists and Render exposes it.
-  recordSseDebug("wxcc-webhook-get-probe", {
-    query: req.query || {},
-    userAgent: req.headers["user-agent"] || ""
-  });
-
-  res.json({
-    ok: true,
-    buildId: BUILD_ID,
-    route: "/api/wxcc/events",
-    method: "GET",
-    note: "Webhook target is reachable. WXCC should POST events to this path."
-  });
-});
-
-
-function analyzeWallboardPayload(payload = {}) {
-  const agents = Array.isArray(payload.agents) ? payload.agents : Array.isArray(payload.agentList) ? payload.agentList : [];
-  const activeCalls = Array.isArray(payload.taskList) ? payload.taskList : [];
-  const waitingCalls = Array.isArray(payload.waitingTaskList) ? payload.waitingTaskList : [];
-  const callHistory = Array.isArray(payload.callHistoryList) ? payload.callHistoryList : [];
-  const connectedAgents = agents.filter(a => String(a.state || "").toLowerCase() === "connected");
-  const connectedHistory = callHistory.filter(c => String(c.status || "").toLowerCase() === "connected");
-  const anomalies = [];
-  if (!Array.isArray(payload.agents) && !Array.isArray(payload.agentList)) anomalies.push("missing-agent-list");
-  if (connectedAgents.length && !activeCalls.length) anomalies.push("connected-agent-without-active-call");
-  if (connectedHistory.length && !activeCalls.length && !connectedAgents.length) anomalies.push("history-connected-without-active-call-or-connected-agent");
-  if (waitingCalls.some(c => Number(c.waitingSeconds || 0) < 0)) anomalies.push("negative-waiting-time");
-  return {
-    topLevelKeys: Object.keys(payload || {}),
-    counts: {
-      agents: agents.length,
-      connectedAgents: connectedAgents.length,
-      activeCalls: activeCalls.length,
-      waitingCalls: waitingCalls.length,
-      callHistory: callHistory.length,
-      connectedHistory: connectedHistory.length
-    },
-    anomalies,
-    samples: { agent: agents[0] || null, activeCall: activeCalls[0] || null, waitingCall: waitingCalls[0] || null, history: callHistory[0] || null }
-  };
-}
-
-app.get("/api/debug/widget-health", requireSession, requireWriteRole, async (req, res) => {
-  const report = {
-    ok: true,
-    buildId: BUILD_ID,
-    now: Date.now(),
-    cacheAgeMs: typeof lastGoodWallboardPayloadTs !== "undefined" && lastGoodWallboardPayloadTs ? Date.now() - lastGoodWallboardPayloadTs : null,
-    lastError: typeof lastWallboardBuildError !== "undefined" ? lastWallboardBuildError : "",
-    cache: typeof lastGoodWallboardPayload !== "undefined" && lastGoodWallboardPayload ? analyzeWallboardPayload(lastGoodWallboardPayload) : null,
-    sseStats: typeof sseDebugStats !== "undefined" ? { ...sseDebugStats, uptimeMs: Date.now() - sseDebugStats.startedAt } : null,
-    sseEvents: typeof sseDebugEvents !== "undefined" ? sseDebugEvents.slice(-30) : []
-  };
-  try {
-    report.fresh = analyzeWallboardPayload(await buildWallboardPayload(req.session || {}));
-  } catch (err) {
-    report.ok = false;
-    report.freshError = err?.message || String(err);
-  }
-  res.json(report);
-});
-
-
-
-app.get("/api/debug/subscription-debug-health", (req, res) => {
-  res.json({
-    ok: true,
-    buildId: BUILD_ID,
-    route: "/api/debug/subscription-debug-health",
-    backend: "https://wxcc-backend.onrender.com",
-    note: "This route does not call WXCC. If this works but wxcc-subscriptions-live fails, the issue is token/WXCC API related, not Express routing."
-  });
-});
-
-
-async function callWxccSubscriptionApi(method, path = "", body = null) {
-  const baseUrl =
-    typeof WXCC_BASE_URL !== "undefined" && WXCC_BASE_URL
-      ? WXCC_BASE_URL
-      : "https://api.wxcc-eu2.cisco.com";
-
-  const token = await getValidServiceToken();
-  const endpoint = `${baseUrl}/v1/subscriptions${path}`;
-
-  const response = await fetch(endpoint, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      ...(body ? { "Content-Type": "application/json" } : {})
-    },
-    ...(body ? { body: JSON.stringify(body) } : {})
-  });
-
-  const text = await response.text();
-  let parsed = null;
-
-  try {
-    parsed = text ? JSON.parse(text) : null;
-  } catch {
-    parsed = text;
-  }
-
-  return {
-    ok: response.ok,
-    status: response.status,
-    endpoint,
-    body: parsed
-  };
-}
-
-function isOldTaskSubscription(subscription) {
-  const eventTypes = Array.isArray(subscription?.eventTypes) ? subscription.eventTypes : [];
-  const oldTaskEvents = ["task:connected", "task:ended", "task:new", "task:parked"];
-
-  return (
-    String(subscription?.destinationUrl || "").includes("/api/wxcc/events")
-    && oldTaskEvents.every(eventType => eventTypes.includes(eventType))
-  );
-}
-
-
-app.get("/api/admin/wxcc-subscriptions/cleanup-preview", requireSession, requireWriteRole, async (req, res) => {
-  try {
-    const result = await callWxccSubscriptionApi("GET");
-    const data = Array.isArray(result?.body?.data) ? result.body.data : Array.isArray(result?.body) ? result.body : [];
-
-    const matching = data.filter(item => String(item.destinationUrl || "").includes("/api/wxcc/events"));
-    const oldTaskSubscriptions = matching.filter(isOldTaskSubscription);
-
-    res.json({
-      ok: result.ok,
-      buildId: BUILD_ID,
-      status: result.status,
-      endpoint: result.endpoint,
-      targetUrl: "https://wxcc-backend.onrender.com/api/wxcc/events",
-      subscriptionCount: data.length,
-      matchingCount: matching.length,
-      oldTaskSubscriptionCount: oldTaskSubscriptions.length,
-      oldTaskSubscriptions,
-      keepRecommendation: [
-        "agent:state_change",
-        "task:connect",
-        "task:failed",
-        "task:origin-updated",
-        "task:customer-left",
-        "task:owner-changed"
-      ],
-      deleteRecommendation: [
-        "task:connected",
-        "task:ended",
-        "task:new",
-        "task:parked"
-      ],
-      note: "Preview only. Use cleanup-old-task?confirm=true to delete old duplicate task subscriptions."
-    });
-  } catch (err) {
-    res.status(200).json({
-      ok: false,
-      buildId: BUILD_ID,
-      stage: "cleanup-preview",
-      error: err?.message || String(err)
-    });
-  }
-});
-
-app.post("/api/admin/wxcc-subscriptions/cleanup-old-task", requireSession, requireWriteRole, async (req, res) => {
-  const confirm = String(req.query.confirm || req.body?.confirm || "").toLowerCase() === "true";
-
-  try {
-    const listResult = await callWxccSubscriptionApi("GET");
-    const data = Array.isArray(listResult?.body?.data) ? listResult.body.data : Array.isArray(listResult?.body) ? listResult.body : [];
-    const oldTaskSubscriptions = data
-      .filter(item => String(item.destinationUrl || "").includes("/api/wxcc/events"))
-      .filter(isOldTaskSubscription);
-
-    if (!confirm) {
-      return res.json({
-        ok: true,
-        buildId: BUILD_ID,
-        dryRun: true,
-        oldTaskSubscriptionCount: oldTaskSubscriptions.length,
-        oldTaskSubscriptions,
-        nextStep: "POST /api/admin/wxcc-subscriptions/cleanup-old-task?confirm=true"
-      });
-    }
-
-    const deleteResults = [];
-
-    for (const subscription of oldTaskSubscriptions) {
-      const deleteResult = await callWxccSubscriptionApi("DELETE", `/${subscription.id}`);
-      deleteResults.push({
-        id: subscription.id,
-        name: subscription.name,
-        eventTypes: subscription.eventTypes,
-        ok: deleteResult.ok,
-        status: deleteResult.status,
-        body: deleteResult.body
-      });
-    }
-
-    res.json({
-      ok: deleteResults.every(item => item.ok),
-      buildId: BUILD_ID,
-      deletedCount: deleteResults.filter(item => item.ok).length,
-      attemptedCount: deleteResults.length,
-      deleteResults
-    });
-  } catch (err) {
-    res.status(200).json({
-      ok: false,
-      buildId: BUILD_ID,
-      stage: "cleanup-delete",
-      error: err?.message || String(err)
-    });
-  }
-});
-
-app.delete("/api/admin/wxcc-subscriptions/:id", requireSession, requireWriteRole, async (req, res) => {
-  try {
-    const id = String(req.params.id || "").trim();
-
-    if (!id) {
-      return res.status(400).json({
-        ok: false,
-        buildId: BUILD_ID,
-        error: "Missing subscription id"
-      });
-    }
-
-    const result = await callWxccSubscriptionApi("DELETE", `/${encodeURIComponent(id)}`);
-
-    res.status(200).json({
-      ok: result.ok,
-      buildId: BUILD_ID,
-      id,
-      status: result.status,
-      endpoint: result.endpoint,
-      body: result.body
-    });
-  } catch (err) {
-    res.status(200).json({
-      ok: false,
-      buildId: BUILD_ID,
-      stage: "delete-by-id",
-      error: err?.message || String(err)
     });
   }
 });
