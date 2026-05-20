@@ -48,10 +48,11 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-sse-event-deep-debug-2026-05-19-v23";
+const BUILD_ID = "wxcc-comprehensive-event-watchdog-debug-2026-05-20-v25";
 
 const SSE_DEBUG_MAX = Number(process.env.SSE_DEBUG_MAX || 200);
 const sseDebugEvents = [];
+const webhookEventTypeCounters = {};
 const sseDebugStats = {
   startedAt: Date.now(),
   wxccEventsReceived: 0,
@@ -1185,6 +1186,25 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       available: availableAgents.length
     },
 
+    agents: agents.map(agent => {
+      const channel = getPrimaryChannelInfo(agent);
+
+      return {
+        name: agent.agentName || "",
+        login: agent.userLoginId || "",
+        state: getDisplayState(agent),
+        currentState: channel?.currentState || "",
+        idleCodeName: channel?.idleCodeName || "",
+        teamId: agent.teamId || "",
+        team: agent.teamName || "",
+        site: agent.siteName || "",
+        startTime: agent.startTime || null,
+        lastActivityTime: channel?.lastActivityTime || null
+      };
+    }),
+    agentsAliasAdded: true,
+
+
     agentList: agents.map(agent => {
       const channel = getPrimaryChannelInfo(agent);
 
@@ -1528,6 +1548,9 @@ app.get("/api/wallboard/stream", async (req, res) => {
 
 app.use("/api/wxcc/events", (req, res, next) => {
   sseDebugStats.wxccEventsReceived += 1;
+  const eventSummary = summarizeEventBody(req.body);
+  const eventCounterKey = eventSummary.eventType || "unknown";
+  webhookEventTypeCounters[eventCounterKey] = (webhookEventTypeCounters[eventCounterKey] || 0) + 1;
   recordSseDebug("wxcc-webhook-inbound", {
     method: req.method,
     path: req.originalUrl || req.url,
@@ -1536,7 +1559,7 @@ app.use("/api/wxcc/events", (req, res, next) => {
       contentType: req.headers["content-type"] || "",
       xTrackingId: req.headers["trackingid"] || req.headers["x-tracking-id"] || ""
     },
-    body: summarizeEventBody(req.body)
+    body: eventSummary
   });
   next();
 });
@@ -1904,6 +1927,8 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    comprehensiveEventWatchdogDebug: true,
+    agentsWebhookDiagnosticsFix: true,
     sseEventDeepDebug: true,
     wallboard500ResilienceFix: true,
     focusResumeRefreshFix: true,
@@ -3435,9 +3460,27 @@ app.get("/api/debug/wallboard-cache", requireSession, requireWriteRole, async (r
     lastError: lastWallboardBuildError || "",
     sample: lastGoodWallboardPayload
       ? {
+          topLevelKeys: Object.keys(lastGoodWallboardPayload),
           agents: Array.isArray(lastGoodWallboardPayload.agents) ? lastGoodWallboardPayload.agents.length : null,
+          agentList: Array.isArray(lastGoodWallboardPayload.agentList) ? lastGoodWallboardPayload.agentList.length : null,
+          agentStateList: Array.isArray(lastGoodWallboardPayload.agentStateList) ? lastGoodWallboardPayload.agentStateList.length : null,
           taskList: Array.isArray(lastGoodWallboardPayload.taskList) ? lastGoodWallboardPayload.taskList.length : null,
-          callHistoryList: Array.isArray(lastGoodWallboardPayload.callHistoryList) ? lastGoodWallboardPayload.callHistoryList.length : null
+          waitingTaskList: Array.isArray(lastGoodWallboardPayload.waitingTaskList) ? lastGoodWallboardPayload.waitingTaskList.length : null,
+          callHistoryList: Array.isArray(lastGoodWallboardPayload.callHistoryList) ? lastGoodWallboardPayload.callHistoryList.length : null,
+          firstAgent:
+            Array.isArray(lastGoodWallboardPayload.agents) && lastGoodWallboardPayload.agents.length
+              ? lastGoodWallboardPayload.agents[0]
+              : Array.isArray(lastGoodWallboardPayload.agentList) && lastGoodWallboardPayload.agentList.length
+                ? lastGoodWallboardPayload.agentList[0]
+                : null,
+          firstTask:
+            Array.isArray(lastGoodWallboardPayload.taskList) && lastGoodWallboardPayload.taskList.length
+              ? lastGoodWallboardPayload.taskList[0]
+              : null,
+          firstHistory:
+            Array.isArray(lastGoodWallboardPayload.callHistoryList) && lastGoodWallboardPayload.callHistoryList.length
+              ? lastGoodWallboardPayload.callHistoryList[0]
+              : null
         }
       : null
   });
@@ -3461,6 +3504,7 @@ app.get("/api/debug/sse-events", requireSession, requireWriteRole, async (req, r
       typeof lastGoodWallboardPayloadTs !== "undefined" && lastGoodWallboardPayloadTs
         ? Date.now() - lastGoodWallboardPayloadTs
         : null,
+    webhookEventTypeCounters,
     events: sseDebugEvents.slice(-limit)
   });
 });
@@ -3472,6 +3516,155 @@ app.post("/api/debug/sse-events/clear", requireSession, requireWriteRole, async 
     else sseDebugStats[key] = 0;
   });
   res.json({ ok: true, buildId: BUILD_ID });
+});
+
+
+
+app.get("/api/debug/wallboard-shape", requireSession, requireWriteRole, async (req, res) => {
+  try {
+    const payload = await buildWallboardPayload(req.session || {});
+
+    res.json({
+      ok: true,
+      buildId: BUILD_ID,
+      topLevelKeys: Object.keys(payload || {}),
+      counts: {
+        agents: Array.isArray(payload?.agents) ? payload.agents.length : null,
+        agentList: Array.isArray(payload?.agentList) ? payload.agentList.length : null,
+        agentStateList: Array.isArray(payload?.agentStateList) ? payload.agentStateList.length : null,
+        taskList: Array.isArray(payload?.taskList) ? payload.taskList.length : null,
+        waitingTaskList: Array.isArray(payload?.waitingTaskList) ? payload.waitingTaskList.length : null,
+        callHistoryList: Array.isArray(payload?.callHistoryList) ? payload.callHistoryList.length : null
+      },
+      samples: {
+        agent:
+          Array.isArray(payload?.agents) && payload.agents.length
+            ? payload.agents[0]
+            : Array.isArray(payload?.agentList) && payload.agentList.length
+              ? payload.agentList[0]
+              : null,
+        task: Array.isArray(payload?.taskList) && payload.taskList.length ? payload.taskList[0] : null,
+        history: Array.isArray(payload?.callHistoryList) && payload.callHistoryList.length ? payload.callHistoryList[0] : null
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      error: err?.message || String(err)
+    });
+  }
+});
+
+
+
+app.get("/api/debug/wxcc-subscriptions-live", requireSession, requireWriteRole, async (req, res) => {
+  const endpoint = `${WXCC_BASE_URL}/v1/subscriptions`;
+
+  try {
+    const token = await getValidServiceToken();
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
+      }
+    });
+
+    const text = await response.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+
+    const data = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+    const matching = data.filter(item => String(item.destinationUrl || "").includes("/api/wxcc/events"));
+
+    res.json({
+      ok: response.ok,
+      buildId: BUILD_ID,
+      status: response.status,
+      endpoint,
+      targetUrl: `${PUBLIC_BASE_URL || "https://wxcc-backend.onrender.com"}/api/wxcc/events`,
+      subscriptionCount: data.length,
+      matchingCount: matching.length,
+      matching,
+      body
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      buildId: BUILD_ID,
+      endpoint,
+      error: err?.message || String(err)
+    });
+  }
+});
+
+app.get("/api/wxcc/events", (req, res) => {
+  // Public diagnostic only: proves the route exists and Render exposes it.
+  recordSseDebug("wxcc-webhook-get-probe", {
+    query: req.query || {},
+    userAgent: req.headers["user-agent"] || ""
+  });
+
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    route: "/api/wxcc/events",
+    method: "GET",
+    note: "Webhook target is reachable. WXCC should POST events to this path."
+  });
+});
+
+
+function analyzeWallboardPayload(payload = {}) {
+  const agents = Array.isArray(payload.agents) ? payload.agents : Array.isArray(payload.agentList) ? payload.agentList : [];
+  const activeCalls = Array.isArray(payload.taskList) ? payload.taskList : [];
+  const waitingCalls = Array.isArray(payload.waitingTaskList) ? payload.waitingTaskList : [];
+  const callHistory = Array.isArray(payload.callHistoryList) ? payload.callHistoryList : [];
+  const connectedAgents = agents.filter(a => String(a.state || "").toLowerCase() === "connected");
+  const connectedHistory = callHistory.filter(c => String(c.status || "").toLowerCase() === "connected");
+  const anomalies = [];
+  if (!Array.isArray(payload.agents) && !Array.isArray(payload.agentList)) anomalies.push("missing-agent-list");
+  if (connectedAgents.length && !activeCalls.length) anomalies.push("connected-agent-without-active-call");
+  if (connectedHistory.length && !activeCalls.length && !connectedAgents.length) anomalies.push("history-connected-without-active-call-or-connected-agent");
+  if (waitingCalls.some(c => Number(c.waitingSeconds || 0) < 0)) anomalies.push("negative-waiting-time");
+  return {
+    topLevelKeys: Object.keys(payload || {}),
+    counts: {
+      agents: agents.length,
+      connectedAgents: connectedAgents.length,
+      activeCalls: activeCalls.length,
+      waitingCalls: waitingCalls.length,
+      callHistory: callHistory.length,
+      connectedHistory: connectedHistory.length
+    },
+    anomalies,
+    samples: { agent: agents[0] || null, activeCall: activeCalls[0] || null, waitingCall: waitingCalls[0] || null, history: callHistory[0] || null }
+  };
+}
+
+app.get("/api/debug/widget-health", requireSession, requireWriteRole, async (req, res) => {
+  const report = {
+    ok: true,
+    buildId: BUILD_ID,
+    now: Date.now(),
+    cacheAgeMs: typeof lastGoodWallboardPayloadTs !== "undefined" && lastGoodWallboardPayloadTs ? Date.now() - lastGoodWallboardPayloadTs : null,
+    lastError: typeof lastWallboardBuildError !== "undefined" ? lastWallboardBuildError : "",
+    cache: typeof lastGoodWallboardPayload !== "undefined" && lastGoodWallboardPayload ? analyzeWallboardPayload(lastGoodWallboardPayload) : null,
+    sseStats: typeof sseDebugStats !== "undefined" ? { ...sseDebugStats, uptimeMs: Date.now() - sseDebugStats.startedAt } : null,
+    sseEvents: typeof sseDebugEvents !== "undefined" ? sseDebugEvents.slice(-30) : []
+  };
+  try {
+    report.fresh = analyzeWallboardPayload(await buildWallboardPayload(req.session || {}));
+  } catch (err) {
+    report.ok = false;
+    report.freshError = err?.message || String(err);
+  }
+  res.json(report);
 });
 
 
