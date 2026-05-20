@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-comprehensive-event-watchdog-debug-2026-05-20-v25";
+const BUILD_ID = "wxcc-subscription-debug-safe-fix-2026-05-20-v26";
 
 const SSE_DEBUG_MAX = Number(process.env.SSE_DEBUG_MAX || 200);
 const sseDebugEvents = [];
@@ -1927,6 +1927,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    subscriptionDebugSafeFix: true,
     comprehensiveEventWatchdogDebug: true,
     agentsWebhookDiagnosticsFix: true,
     sseEventDeepDebug: true,
@@ -3559,17 +3560,47 @@ app.get("/api/debug/wallboard-shape", requireSession, requireWriteRole, async (r
 
 
 app.get("/api/debug/wxcc-subscriptions-live", requireSession, requireWriteRole, async (req, res) => {
-  const endpoint = `${WXCC_BASE_URL}/v1/subscriptions`;
+  const baseUrl =
+    typeof WXCC_BASE_URL !== "undefined" && WXCC_BASE_URL
+      ? WXCC_BASE_URL
+      : "https://api.wxcc-eu2.cisco.com";
+
+  const endpoint = `${baseUrl}/v1/subscriptions`;
+  const targetUrl = "https://wxcc-backend.onrender.com/api/wxcc/events";
 
   try {
-    const token = await getValidServiceToken();
-    const response = await fetch(endpoint, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json"
-      }
-    });
+    let token = "";
+
+    try {
+      token = await getValidServiceToken();
+    } catch (tokenErr) {
+      return res.status(200).json({
+        ok: false,
+        buildId: BUILD_ID,
+        stage: "token",
+        endpoint,
+        targetUrl,
+        error: tokenErr?.message || String(tokenErr),
+        hint: "Token retrieval failed before calling WXCC subscriptions API."
+      });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json"
+        },
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const text = await response.text();
     let body = null;
@@ -3582,23 +3613,26 @@ app.get("/api/debug/wxcc-subscriptions-live", requireSession, requireWriteRole, 
     const data = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
     const matching = data.filter(item => String(item.destinationUrl || "").includes("/api/wxcc/events"));
 
-    res.json({
+    res.status(200).json({
       ok: response.ok,
       buildId: BUILD_ID,
       status: response.status,
       endpoint,
-      targetUrl: `${PUBLIC_BASE_URL || "https://wxcc-backend.onrender.com"}/api/wxcc/events`,
+      targetUrl,
       subscriptionCount: data.length,
       matchingCount: matching.length,
       matching,
       body
     });
   } catch (err) {
-    res.status(500).json({
+    res.status(200).json({
       ok: false,
       buildId: BUILD_ID,
+      stage: "fetch",
       endpoint,
-      error: err?.message || String(err)
+      targetUrl,
+      error: err?.message || String(err),
+      hint: "The debug endpoint failed safely. Render should no longer return 502 for this route."
     });
   }
 });
@@ -3665,6 +3699,18 @@ app.get("/api/debug/widget-health", requireSession, requireWriteRole, async (req
     report.freshError = err?.message || String(err);
   }
   res.json(report);
+});
+
+
+
+app.get("/api/debug/subscription-debug-health", (req, res) => {
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    route: "/api/debug/subscription-debug-health",
+    backend: "https://wxcc-backend.onrender.com",
+    note: "This route does not call WXCC. If this works but wxcc-subscriptions-live fails, the issue is token/WXCC API related, not Express routing."
+  });
 });
 
 
