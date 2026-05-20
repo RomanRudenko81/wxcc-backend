@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-subscription-cleanup-full-2026-05-20-v27";
+const BUILD_ID = "wxcc-realtime-sse-initial-payload-fix-2026-05-20-v28";
 
 const SSE_DEBUG_MAX = Number(process.env.SSE_DEBUG_MAX || 200);
 const sseDebugEvents = [];
@@ -1473,76 +1473,124 @@ async function sendWallboardPayload(res, session, reason = "stream") {
   }
 }
 
-app.get("/api/wallboard/stream", async (req, res) => {
+app.get("/api/wallboard/stream", requireSession, async (req, res) => {
   sseDebugStats.wallboardStreamConnections += 1;
   recordSseDebug("wallboard-stream-connect", {
     sessionTokenPresent: !!(req.query?.token),
     userAgent: req.headers["user-agent"] || "",
     accept: req.headers["accept"] || ""
   });
-  req.on("close", () => {
-    sseDebugStats.wallboardStreamDisconnects += 1;
-    recordSseDebug("wallboard-stream-disconnect", { reason: "request-close" });
-  });
 
-
-  const session = getSessionFromRequest(req);
-
-  if (!session) {
-    return res.status(401).json({
-      error: "Invalid or expired session"
-    });
-  }
-
-  req.session = session;
-
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no"
-  });
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
 
   if (typeof res.flushHeaders === "function") {
     res.flushHeaders();
   }
 
-  const client = {
-    id: crypto.randomUUID(),
-    session,
-    res,
-    lastPayload: ""
+  const sendEvent = (eventName, data = {}) => {
+    try {
+      res.write(`event: ${eventName}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch (err) {
+      recordSseDebug("wallboard-stream-write-error", {
+        eventName,
+        error: err?.message || String(err)
+      });
+    }
   };
 
-  wallboardSseClients.add(client);
-
-  writeSseEvent(res, "ready", {
+  sendEvent("ready", {
     ok: true,
-    mode: WALLBOARD_FALLBACK_POLLING_ENABLED ? "event-bridge-with-fallback" : "event-only",
-    generatedAt: new Date().toISOString(),
-    fallbackPollingEnabled: WALLBOARD_FALLBACK_POLLING_ENABLED,
-    fallbackRefreshMs: WALLBOARD_FALLBACK_POLLING_ENABLED ? WALLBOARD_DATA_CACHE_TTL_MS : null,
-    eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS
+    buildId: BUILD_ID,
+    ts: Date.now()
   });
 
-  // Initial load once when the widget connects.
-  await pushWallboardUpdateToClient(client, true);
-
-  const fallbackTimer = WALLBOARD_FALLBACK_POLLING_ENABLED
-    ? setInterval(() => {
-        pushWallboardUpdateToClient(client, false);
-      }, WALLBOARD_DATA_CACHE_TTL_MS)
-    : null;
-
-  const heartbeatTimer = setInterval(() => {
-    res.write(`: heartbeat ${Date.now()}\n\n`);
-  }, SSE_HEARTBEAT_MS);
+  let closed = false;
+  let heartbeatHandle = null;
 
   req.on("close", () => {
-    wallboardSseClients.delete(client);
-    if (fallbackTimer) clearInterval(fallbackTimer);
-    clearInterval(heartbeatTimer);
+    closed = true;
+    sseDebugStats.wallboardStreamDisconnects += 1;
+    recordSseDebug("wallboard-stream-disconnect", { reason: "request-close" });
+
+    if (heartbeatHandle) clearInterval(heartbeatHandle);
   });
+
+  const sendWallboardNow = async (reason = "stream") => {
+    if (closed) return;
+
+    try {
+      const payload = await buildWallboardPayload(req.session || {});
+      lastGoodWallboardPayload = payload;
+      lastGoodWallboardPayloadTs = Date.now();
+      lastWallboardBuildError = "";
+
+      sseDebugStats.wallboardMessagesSent += 1;
+      recordSseDebug("wallboard-stream-send", {
+        reason,
+        agents: Array.isArray(payload.agents) ? payload.agents.length : null,
+        agentList: Array.isArray(payload.agentList) ? payload.agentList.length : null,
+        active: Array.isArray(payload.taskList) ? payload.taskList.length : null,
+        waiting: Array.isArray(payload.waitingTaskList) ? payload.waitingTaskList.length : null,
+        history: Array.isArray(payload.callHistoryList) ? payload.callHistoryList.length : null,
+        stale: false
+      });
+
+      sendEvent("wallboard", payload);
+    } catch (err) {
+      lastWallboardBuildError = err?.message || String(err);
+      sseDebugStats.wallboardBuildErrors += 1;
+
+      recordSseDebug("wallboard-stream-build-error", {
+        reason,
+        error: lastWallboardBuildError
+      });
+
+      if (lastGoodWallboardPayload && Date.now() - lastGoodWallboardPayloadTs < 300000) {
+        const stalePayload = {
+          ...lastGoodWallboardPayload,
+          ok: true,
+          stale: true,
+          staleReason: `wallboard-stream-build-failed:${reason}`,
+          staleAgeMs: Date.now() - lastGoodWallboardPayloadTs,
+          lastError: lastWallboardBuildError
+        };
+
+        sseDebugStats.wallboardMessagesSent += 1;
+        recordSseDebug("wallboard-stream-send", {
+          reason,
+          stale: true,
+          staleAgeMs: stalePayload.staleAgeMs,
+          error: lastWallboardBuildError
+        });
+
+        sendEvent("wallboard", stalePayload);
+      } else {
+        sendEvent("wallboard-error", {
+          ok: false,
+          buildId: BUILD_ID,
+          reason,
+          error: lastWallboardBuildError
+        });
+      }
+    }
+  };
+
+  heartbeatHandle = setInterval(() => {
+    if (closed) return;
+
+    sendEvent("heartbeat", {
+      ok: true,
+      ts: Date.now(),
+      buildId: BUILD_ID
+    });
+  }, 25000);
+
+  await sendWallboardNow("initial-connect");
+  setTimeout(() => sendWallboardNow("initial-followup"), 1500);
 });
 
 
@@ -1927,6 +1975,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    realtimeSseInitialPayloadFix: true,
     subscriptionCleanupFullV27: true,
     subscriptionDebugSafeFix: true,
     comprehensiveEventWatchdogDebug: true,
