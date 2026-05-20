@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-gui-diagnostic-log-2026-05-20-v32";
+const BUILD_ID = "wxcc-widget-technical-diagnostics-2026-05-21-v35";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 300;
@@ -1281,9 +1281,10 @@ async function pushWallboardUpdateToClient(client, force = false) {
       writeSseEvent(client.res, "wallboard", payload);
     }
   } catch (err) {
-    writeSseEvent(client.res, "error", {
+    writeSseEvent(client.res, "wallboard-error", {
       ok: false,
-      error: err.message
+      error: err.message,
+      generatedAt: new Date().toISOString()
     });
   }
 }
@@ -1308,10 +1309,11 @@ function scheduleEventDrivenWallboardRefresh(reason = "wxcc-event") {
         clientCount: wallboardSseClients.size
       });
     } catch (err) {
-      broadcastSseEvent("error", {
+      broadcastSseEvent("wallboard-error", {
         ok: false,
         reason: refreshReason,
-        error: err.message
+        error: err.message,
+        generatedAt: new Date().toISOString()
       });
     }
   };
