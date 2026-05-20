@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-client-live-timer-fix-2026-05-19-v15";
+const BUILD_ID = "wxcc-frontend-timer-history-cache-fix-2026-05-19-v16";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1746,6 +1746,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    frontendTimerHistoryCacheFix: true,
     clientLiveTimerEnabled: true,
     taskLegTerminationCacheEnabled: true,
     taskLegTerminationEnabled: true,
