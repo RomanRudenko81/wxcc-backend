@@ -48,7 +48,12 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-stable-rollback-baseline-2026-05-20-v29";
+const BUILD_ID = "wxcc-wallboard-500-isolation-fix-2026-05-20-v30";
+
+let lastGoodWallboardPayload = null;
+let lastGoodWallboardPayloadTs = 0;
+let lastWallboardBuildError = "";
+let wallboardFailureCount = 0;
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1312,12 +1317,52 @@ function isWebhookSecretValid(req) {
 
 app.get("/api/wallboard", requireSession, async (req, res) => {
   try {
-    const payload = await buildWallboardPayload(req.session, false);
+    const payload = await buildWallboardPayload(req.session || {});
+
+    lastGoodWallboardPayload = payload;
+    lastGoodWallboardPayloadTs = Date.now();
+    lastWallboardBuildError = "";
+
     res.json(payload);
   } catch (err) {
-    res.status(500).json({
-      ok: false,
-      error: err.message
+    wallboardFailureCount += 1;
+    lastWallboardBuildError = err?.stack || err?.message || String(err);
+
+    console.error("[wallboard] build failed", {
+      buildId: BUILD_ID,
+      error: lastWallboardBuildError
+    });
+
+    // Do not disconnect/break the widget on a transient WXCC/Search/Analyzer failure.
+    // Return the last known good payload for up to 10 minutes.
+    if (lastGoodWallboardPayload && Date.now() - lastGoodWallboardPayloadTs < 600000) {
+      return res.status(200).json({
+        ...lastGoodWallboardPayload,
+        ok: true,
+        stale: true,
+        staleReason: "wallboard-build-failed",
+        staleAgeMs: Date.now() - lastGoodWallboardPayloadTs,
+        wallboardFailureCount,
+        lastError: lastWallboardBuildError
+      });
+    }
+
+    // If no cache exists yet, still return a valid minimal payload.
+    return res.status(200).json({
+      ok: true,
+      stale: true,
+      staleReason: "wallboard-build-failed-no-cache",
+      buildId: BUILD_ID,
+      generatedAt: Date.now(),
+      allowedQueues: [],
+      queue: null,
+      agents: [],
+      agentList: [],
+      taskList: [],
+      waitingTaskList: [],
+      callHistoryList: [],
+      wallboardFailureCount,
+      lastError: lastWallboardBuildError
     });
   }
 });
@@ -1746,6 +1791,7 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    wallboard500IsolationFixV30: true,
     stableRollbackBaselineV29: true,
     frontendTimerHistoryCacheFix: true,
     clientLiveTimerEnabled: true,
@@ -3259,6 +3305,28 @@ app.get("/api/debug/live-duration-payload", requireSession, requireWriteRole, as
       error: err.message
     });
   }
+});
+
+
+
+app.get("/api/debug/wallboard-error", requireSession, requireWriteRole, async (req, res) => {
+  res.json({
+    ok: true,
+    buildId: BUILD_ID,
+    wallboardFailureCount,
+    lastError: lastWallboardBuildError || "",
+    hasCache: !!lastGoodWallboardPayload,
+    cacheAgeMs: lastGoodWallboardPayloadTs ? Date.now() - lastGoodWallboardPayloadTs : null,
+    cacheShape: lastGoodWallboardPayload
+      ? {
+          agents: Array.isArray(lastGoodWallboardPayload.agents) ? lastGoodWallboardPayload.agents.length : null,
+          agentList: Array.isArray(lastGoodWallboardPayload.agentList) ? lastGoodWallboardPayload.agentList.length : null,
+          taskList: Array.isArray(lastGoodWallboardPayload.taskList) ? lastGoodWallboardPayload.taskList.length : null,
+          waitingTaskList: Array.isArray(lastGoodWallboardPayload.waitingTaskList) ? lastGoodWallboardPayload.waitingTaskList.length : null,
+          callHistoryList: Array.isArray(lastGoodWallboardPayload.callHistoryList) ? lastGoodWallboardPayload.callHistoryList.length : null
+        }
+      : null
+  });
 });
 
 
