@@ -48,7 +48,34 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-wallboard-500-isolation-fix-2026-05-20-v30";
+const BUILD_ID = "wxcc-gui-diagnostic-log-2026-05-20-v32";
+
+const widgetDiagLog = [];
+const WIDGET_DIAG_LOG_MAX = 300;
+
+function addWidgetDiagLog(type, details = {}) {
+  const entry = { ts: Date.now(), iso: new Date().toISOString(), type, ...details };
+  widgetDiagLog.push(entry);
+  while (widgetDiagLog.length > WIDGET_DIAG_LOG_MAX) widgetDiagLog.shift();
+  return entry;
+}
+
+function summarizeWallboardPayloadForLog(payload = {}) {
+  const history = Array.isArray(payload?.callHistoryList) ? payload.callHistoryList : [];
+  return {
+    ok: payload?.ok,
+    stale: payload?.stale === true,
+    staleReason: payload?.staleReason || "",
+    lastError: payload?.lastError ? String(payload.lastError).slice(0, 500) : "",
+    agents: Array.isArray(payload?.agents) ? payload.agents.length : null,
+    agentList: Array.isArray(payload?.agentList) ? payload.agentList.length : null,
+    taskList: Array.isArray(payload?.taskList) ? payload.taskList.length : null,
+    waitingTaskList: Array.isArray(payload?.waitingTaskList) ? payload.waitingTaskList.length : null,
+    callHistoryList: history.length,
+    connectedHistory: history.filter(call => String(call.status || "").toLowerCase() === "connected").length
+  };
+}
+
 
 let lastGoodWallboardPayload = null;
 let lastGoodWallboardPayloadTs = 0;
@@ -1316,6 +1343,9 @@ function isWebhookSecretValid(req) {
 }
 
 app.get("/api/wallboard", requireSession, async (req, res) => {
+  const requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+  addWidgetDiagLog("wallboard-build-start", { requestId, sessionTokenPresent: !!req.query?.token });
+
   try {
     const payload = await buildWallboardPayload(req.session || {});
 
@@ -1323,10 +1353,25 @@ app.get("/api/wallboard", requireSession, async (req, res) => {
     lastGoodWallboardPayloadTs = Date.now();
     lastWallboardBuildError = "";
 
-    res.json(payload);
+    addWidgetDiagLog("wallboard-build-success", {
+      requestId,
+      summary: summarizeWallboardPayloadForLog(payload)
+    });
+
+    res.json({
+      ...payload,
+      backendBuildId: BUILD_ID,
+      requestId
+    });
   } catch (err) {
     wallboardFailureCount += 1;
     lastWallboardBuildError = err?.stack || err?.message || String(err);
+
+    addWidgetDiagLog("wallboard-build-error", {
+      requestId,
+      wallboardFailureCount,
+      error: lastWallboardBuildError
+    });
 
     console.error("[wallboard] build failed", {
       buildId: BUILD_ID,
@@ -1791,6 +1836,8 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
+    guiDiagnosticLogV32: true,
+    historyEndRefreshFixV31: true,
     wallboard500IsolationFixV30: true,
     stableRollbackBaselineV29: true,
     frontendTimerHistoryCacheFix: true,
@@ -3327,6 +3374,18 @@ app.get("/api/debug/wallboard-error", requireSession, requireWriteRole, async (r
         }
       : null
   });
+});
+
+
+app.get("/api/debug/widget-log", requireSession, requireWriteRole, async (req, res) => {
+  const limit = Math.max(1, Math.min(Number(req.query.limit || 150), WIDGET_DIAG_LOG_MAX));
+  res.json({ ok: true, buildId: BUILD_ID, now: Date.now(), entries: widgetDiagLog.slice(-limit) });
+});
+
+app.post("/api/debug/widget-log/clear", requireSession, requireWriteRole, async (req, res) => {
+  widgetDiagLog.length = 0;
+  addWidgetDiagLog("backend-log-cleared", {});
+  res.json({ ok: true, buildId: BUILD_ID });
 });
 
 
