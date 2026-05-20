@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-duration-source-policy-fix-2026-05-19-v17";
+const BUILD_ID = "wxcc-history-connected-stale-fix-2026-05-19-v20";
 
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me";
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 28800000);
@@ -1040,32 +1040,6 @@ function getTaskDurationSeconds(task) {
   return getLiveTaskSeconds(task);
 }
 
-
-function getActiveHandleDisplaySeconds(task) {
-  const connectedDuration = Number(task?.connectedDuration || 0);
-  if (connectedDuration > 0) return Math.round(connectedDuration / 1000);
-
-  return getLiveTaskSeconds(task);
-}
-
-function getCallHistoryTotalDisplaySeconds(task) {
-  const totalDuration = Number(task?.totalDuration || 0);
-  if (totalDuration > 0) return Math.round(totalDuration / 1000);
-
-  const createdTime = Number(task?.createdTime || 0);
-  const endedTime = Number(task?.endedTime || 0);
-
-  if (createdTime > 0 && endedTime > 0 && endedTime >= createdTime) {
-    return Math.round((endedTime - createdTime) / 1000);
-  }
-
-  if (String(task?.status || "").toLowerCase() === "connected" && createdTime > 0) {
-    return Math.max(0, Math.floor((Date.now() - createdTime) / 1000));
-  }
-
-  return getTaskDurationSeconds(task);
-}
-
 async function buildWallboardPayload(session, forceRefresh = false) {
   const access = await getAllowedQueuesForSession(session);
   const allowedQueues = access.allowedQueues || [];
@@ -1177,7 +1151,7 @@ async function buildWallboardPayload(session, forceRefresh = false) {
     }),
 
     taskList: connectedTasks.map(task => {
-      const liveHandleSeconds = getActiveHandleDisplaySeconds(task);
+      const liveHandleSeconds = getLiveTaskSeconds(task);
       const connectedSeconds = Math.round(Number(task.connectedDuration || 0) / 1000);
 
       return {
@@ -1196,7 +1170,6 @@ async function buildWallboardPayload(session, forceRefresh = false) {
         liveHandleSeconds,
         handleSeconds: connectedSeconds > 0 ? connectedSeconds : liveHandleSeconds,
         handleBaseTimestamp: Date.now(),
-        durationSourcePolicy: "active-connected-handle",
         wrapupReason: getWrapupReasonFromTask(task),
         terminationReason: terminationByTaskId.get(task.id)?.terminationReason || "",
         taskLegId: terminationByTaskId.get(task.id)?.taskLegId || "",
@@ -1236,8 +1209,21 @@ async function buildWallboardPayload(session, forceRefresh = false) {
         queueDuration: task.queueDuration || 0,
         connectedDuration: task.connectedDuration || 0,
         totalDuration: task.totalDuration || 0,
-        liveDurationSeconds: getCallHistoryTotalDisplaySeconds(task),
-        durationSourcePolicy: "total-time-in-wxcc",
+        liveDurationSeconds: (() => {
+          const totalMs = Number(task.totalDuration || 0);
+          const createdMs = Number(task.createdTime || 0);
+          const endedMs = Number(task.endedTime || 0);
+
+          if (totalMs > 0) return Math.round(totalMs / 1000);
+          if (createdMs > 0 && endedMs > 0 && endedMs >= createdMs) {
+            return Math.round((endedMs - createdMs) / 1000);
+          }
+          if (String(task.status || "").toLowerCase() === "connected" && createdMs > 0) {
+            return Math.max(0, Math.floor((Date.now() - createdMs) / 1000));
+          }
+          return 0;
+        })(),
+        durationSourcePolicy: "call-history-total-time-in-wxcc",
         isActive: task.isActive === true,
         isContactHandled: task.isContactHandled === true,
         abandonedType: task.abandonedType || "",
@@ -1774,7 +1760,9 @@ app.get("/api/debug/build", (req, res) => {
     hasEventTypesEndpoint: true,
     hasSubscriptionConfigEndpoint: true,
     hasEventBridge: true,
-    durationSourcePolicyFix: true,
+    historyConnectedStaleFix: true,
+    sseWatchdogStabilityFix: true,
+    durationPolicyStableFix: true,
     frontendTimerHistoryCacheFix: true,
     clientLiveTimerEnabled: true,
     taskLegTerminationCacheEnabled: true,
