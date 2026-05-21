@@ -48,10 +48,10 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-lifecycle-entrypoint-resilience-2026-05-21-v38";
+const BUILD_ID = "wxcc-widget-persistent-crash-log-2026-05-21-v39";
 
 const widgetDiagLog = [];
-const WIDGET_DIAG_LOG_MAX = 500;
+const WIDGET_DIAG_LOG_MAX = 2000;
 
 function addWidgetDiagLog(type, details = {}) {
   const entry = { ts: Date.now(), iso: new Date().toISOString(), type, ...details };
@@ -3709,6 +3709,30 @@ app.get("/api/debug/wallboard-error", requireSession, requireWriteRole, async (r
   });
 });
 
+
+
+app.post("/api/debug/client-log", (req, res) => {
+  try {
+    const body = req.body || {};
+    const entries = Array.isArray(body.entries) ? body.entries.slice(-100) : [];
+    const session = getSessionFromRequest(req);
+    for (const entry of entries) {
+      addWidgetDiagLog("client:" + String(entry.type || "unknown"), {
+        clientTs: entry.ts || null,
+        clientIso: entry.iso || "",
+        frontendBuildId: body.frontendBuildId || "",
+        href: body.href || "",
+        userAgent: body.userAgent || "",
+        sessionValid: Boolean(session),
+        details: entry
+      });
+    }
+    res.json({ ok: true, buildId: BUILD_ID, accepted: entries.length });
+  } catch (err) {
+    addWidgetDiagLog("client-log-ingest-error", { error: err?.message || String(err) });
+    res.status(200).json({ ok: false, buildId: BUILD_ID, error: "client-log-ingest-error" });
+  }
+});
 
 app.get("/api/debug/widget-log", requireSession, requireWriteRole, async (req, res) => {
   const limit = Math.max(1, Math.min(Number(req.query.limit || 150), WIDGET_DIAG_LOG_MAX));
