@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v41-active-call-reconstruction-2026-05-21";
+const BUILD_ID = "wxcc-widget-v42-event-state-authority-2026-05-21";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -910,6 +910,7 @@ const EVENT_REFRESH_RETRY_DELAYS_MS = String(
   .filter(v => Number.isFinite(v) && v >= 0);
 
 const WALLBOARD_EVENT_STATE_TTL_MS = Number(process.env.WALLBOARD_EVENT_STATE_TTL_MS || 120000);
+const WALLBOARD_EVENT_STATE_SNAPSHOT_REJECT_MS = Number(process.env.WALLBOARD_EVENT_STATE_SNAPSHOT_REJECT_MS || 90000);
 const WALLBOARD_MIN_PUBLISH_HISTORY_GRACE_MS = Number(process.env.WALLBOARD_MIN_PUBLISH_HISTORY_GRACE_MS || 120000);
 const WALLBOARD_REFRESH_MIN_GAP_MS = Number(process.env.WALLBOARD_REFRESH_MIN_GAP_MS || 750);
 
@@ -1202,6 +1203,14 @@ function rememberAgentStateFromWxccEvent(body = {}) {
   const displayState = displayStateByEventState[currentState];
   if (!displayState) return;
 
+  const createdTime = Number(data.createdTime || 0);
+  const previous = agentEventStateCache.get(agentId);
+  const previousCreatedTime = Number(previous?.createdTime || 0);
+  if (previousCreatedTime && createdTime && createdTime < previousCreatedTime) {
+    addWidgetDiagLog("agent-event-state-older-ignored", { agentId, currentState, createdTime, previousCreatedTime });
+    return;
+  }
+
   agentEventStateCache.set(agentId, {
     agentId,
     currentState,
@@ -1209,8 +1218,9 @@ function rememberAgentStateFromWxccEvent(body = {}) {
     connectedChannels: Array.isArray(data.connectedChannels) ? data.connectedChannels : [],
     idleCodeId: data.idleCodeId || "",
     taskId: data.taskId || "",
-    createdTime: data.createdTime || null,
-    receivedAtMs: Date.now()
+    createdTime: createdTime || Date.now(),
+    receivedAtMs: Date.now(),
+    source: "wxcc-event-authority"
   });
 
   addWidgetDiagLog("agent-event-state-cache-updated", {
@@ -1245,6 +1255,10 @@ function applyAgentEventOverrides(payload = {}) {
     const override = getFreshAgentEventOverride(agent.agentId || agent.id);
     if (!override) continue;
 
+    const snapshotActivity = Number(agent.lastActivityTime || agent.startTime || 0);
+    const eventCreated = Number(override.createdTime || 0);
+    if (snapshotActivity && eventCreated && snapshotActivity > eventCreated + WALLBOARD_EVENT_STATE_SNAPSHOT_REJECT_MS) continue;
+
     const sourceState = String(agent.state || "");
     agent.state = override.displayState;
     agent.currentState = override.currentState;
@@ -1252,7 +1266,8 @@ function applyAgentEventOverrides(payload = {}) {
       applied: true,
       sourceState,
       eventState: override.currentState,
-      ageMs: override.ageMs
+      ageMs: override.ageMs,
+      authority: "wxcc-event"
     };
     applied += 1;
   }
