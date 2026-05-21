@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v53-analytics-probe-2026-05-21";
+const BUILD_ID = "wxcc-widget-v54-queue-all-fields-kpis-2026-05-21";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -1936,6 +1936,225 @@ function averageSeconds(values = []) {
   return Math.round(clean.reduce((sum, v) => sum + v, 0) / clean.length);
 }
 
+
+const ANALYZER_BASE_URL = process.env.ANALYZER_BASE_URL || "https://analyzer-v2.wxcc-eu2.cisco.com";
+const QUEUE_ALL_FIELDS_REPORT_ID = process.env.QUEUE_ALL_FIELDS_REPORT_ID || "1268";
+
+function parseReportDurationSeconds(value) {
+  if (value == null) return 0;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    return value > 10000 ? Math.round(value / 1000) : Math.round(value);
+  }
+
+  const text = String(value || "").trim();
+  if (!text) return 0;
+
+  const parts = text.split(":").map(v => v.trim());
+  if (parts.length >= 3) {
+    const [h, m, secPart] = parts.slice(-3);
+    const seconds = Number(String(secPart).replace(",", "."));
+    const total = Number(h) * 3600 + Number(m) * 60 + seconds;
+    return Number.isFinite(total) && total > 0 ? Math.round(total) : 0;
+  }
+
+  const numeric = Number(text.replace(",", "."));
+  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0;
+}
+
+function normalizeReportKey(key = "") {
+  return String(key || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function metricFromObject(obj = {}, possibleKeys = []) {
+  if (!obj || typeof obj !== "object") return null;
+  const entries = Object.entries(obj);
+  for (const wanted of possibleKeys) {
+    const wantedNorm = normalizeReportKey(wanted);
+    const match = entries.find(([key]) => normalizeReportKey(key) === wantedNorm || normalizeReportKey(key).includes(wantedNorm));
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function collectReportMetricRows(payload, rows = []) {
+  if (!payload) return rows;
+
+  if (Array.isArray(payload)) {
+    payload.forEach(item => collectReportMetricRows(item, rows));
+    return rows;
+  }
+
+  if (typeof payload !== "object") return rows;
+
+  const avgQueue = metricFromObject(payload, ["Average Queue Time", "averageQueueTime", "avgQueueTime"]);
+  const maxQueue = metricFromObject(payload, ["Maximum Queue Time", "maximumQueueTime", "maxQueueTime"]);
+  const avgHandled = metricFromObject(payload, ["Average Handled Time", "averageHandledTime", "avgHandledTime", "Average Handle Time"]);
+  const queueName = metricFromObject(payload, ["Queue Name", "queueName", "Queue"]);
+
+  if (avgQueue != null || maxQueue != null || avgHandled != null) {
+    rows.push({ queueName, avgQueue, maxQueue, avgHandled, raw: payload });
+  }
+
+  const columns = Array.isArray(payload.columns) ? payload.columns : Array.isArray(payload.headers) ? payload.headers : [];
+  const dataRows = Array.isArray(payload.rows) ? payload.rows : Array.isArray(payload.data) ? payload.data : [];
+  if (columns.length && dataRows.length) {
+    const columnNames = columns.map(c => String(c?.label || c?.name || c?.fieldName || c?.title || c || ""));
+    dataRows.forEach(row => {
+      if (!Array.isArray(row)) return;
+      const obj = {};
+      row.forEach((cell, idx) => { obj[columnNames[idx] || `col${idx}`] = cell?.value ?? cell; });
+      collectReportMetricRows(obj, rows);
+    });
+  }
+
+  Object.values(payload).forEach(value => {
+    if (value && typeof value === "object") collectReportMetricRows(value, rows);
+  });
+
+  return rows;
+}
+
+function selectReportMetricRow(rows = [], selectedQueues = []) {
+  if (!rows.length) return null;
+  const normalizedSelected = selectedQueues.map(q => normalizeText(q)).filter(Boolean);
+  if (normalizedSelected.length) {
+    const direct = rows.find(row => normalizedSelected.includes(normalizeText(row.queueName || "")));
+    if (direct) return direct;
+  }
+
+  // For a filtered Analyzer report there is often exactly one row. If multiple rows exist,
+  // combine by preferring the first row with an Average Handled Time value.
+  return rows.find(row => row.avgHandled != null || row.avgQueue != null || row.maxQueue != null) || rows[0];
+}
+
+function buildAnalyzerDurationFilter(range = "60m") {
+  const key = String(range || "60m").toLowerCase();
+  if (key === "today") return { label: "Today since midnight", duration: "TODAY", analyzerDuration: "Today" };
+  if (key === "30m") return { label: "Last 30 minutes", duration: "LAST_30_MINUTES", analyzerDuration: "Last 30 Minutes" };
+  return { label: "Last 60 minutes", duration: "LAST_60_MINUTES", analyzerDuration: "Last 60 Minutes" };
+}
+
+async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "60m", requestId = "" } = {}) {
+  const token = await getValidServiceToken();
+  const durationFilter = buildAnalyzerDurationFilter(range);
+  const queueName = selectedQueues.length === 1 ? selectedQueues[0] : "All";
+
+  const payload = {
+    cid: WEBEX_ORG_ID,
+    orgId: WEBEX_ORG_ID,
+    rId: QUEUE_ALL_FIELDS_REPORT_ID,
+    reportId: QUEUE_ALL_FIELDS_REPORT_ID,
+    filters: {
+      queueName,
+      queueNames: selectedQueues,
+      duration: durationFilter.duration,
+      analyzerDuration: durationFilter.analyzerDuration,
+      channelType: "All",
+      serviceLevelConfig: "All"
+    },
+    variables: {
+      queueName,
+      queueNames: selectedQueues,
+      duration: durationFilter.duration,
+      analyzerDuration: durationFilter.analyzerDuration,
+      channelType: "All",
+      serviceLevelConfig: "All"
+    }
+  };
+
+  const candidates = [
+    { method: "POST", path: `/analyzer/api/v1/reports/${QUEUE_ALL_FIELDS_REPORT_ID}/execute`, body: payload },
+    { method: "POST", path: `/analyzer/reporting/api/v1/reports/${QUEUE_ALL_FIELDS_REPORT_ID}/execute`, body: payload },
+    { method: "POST", path: `/api/v1/reports/${QUEUE_ALL_FIELDS_REPORT_ID}/execute`, body: payload },
+    { method: "POST", path: `/api/reporting/v1/reports/${QUEUE_ALL_FIELDS_REPORT_ID}/execute`, body: payload },
+    { method: "POST", path: `/analyzer/api/report/execute`, body: payload },
+    { method: "POST", path: `/api/report/execute`, body: payload },
+    { method: "GET", path: `/analyzer/view/visualization?cid=${encodeURIComponent(WEBEX_ORG_ID)}&rId=${encodeURIComponent(QUEUE_ALL_FIELDS_REPORT_ID)}` }
+  ];
+
+  const attempts = [];
+
+  for (const candidate of candidates) {
+    const url = `${ANALYZER_BASE_URL}${candidate.path}`;
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(url, {
+        method: candidate.method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json, text/plain, */*",
+          ...(candidate.method === "POST" ? { "Content-Type": "application/json" } : {})
+        },
+        ...(candidate.method === "POST" ? { body: JSON.stringify(candidate.body) } : {})
+      });
+      const text = await response.text();
+      const contentType = response.headers.get("content-type") || "";
+      let json = null;
+      if (contentType.includes("json") || text.trim().startsWith("{") || text.trim().startsWith("[")) {
+        try { json = JSON.parse(text); } catch {}
+      }
+
+      const rows = json ? collectReportMetricRows(json) : [];
+      const selected = selectReportMetricRow(rows, selectedQueues);
+      attempts.push({
+        path: candidate.path,
+        method: candidate.method,
+        ok: response.ok,
+        status: response.status,
+        contentType,
+        durationMs: Date.now() - startedAt,
+        rowCount: rows.length,
+        preview: String(text || "").slice(0, 500)
+      });
+
+      if (response.ok && selected) {
+        const metrics = {
+          longestWaitingSeconds: parseReportDurationSeconds(selected.maxQueue),
+          avgWaitSeconds: parseReportDurationSeconds(selected.avgQueue),
+          avgHandleSeconds: parseReportDurationSeconds(selected.avgHandled)
+        };
+
+        return {
+          ok: true,
+          source: "wxcc-analyzer-queue-all-fields-report",
+          reportId: QUEUE_ALL_FIELDS_REPORT_ID,
+          analyzerBaseUrl: ANALYZER_BASE_URL,
+          durationFilter,
+          selectedRow: {
+            queueName: selected.queueName || queueName,
+            averageQueueTime: selected.avgQueue,
+            maximumQueueTime: selected.maxQueue,
+            averageHandledTime: selected.avgHandled
+          },
+          metrics,
+          attempts
+        };
+      }
+    } catch (err) {
+      attempts.push({
+        path: candidate.path,
+        method: candidate.method,
+        ok: false,
+        error: err?.message || String(err),
+        durationMs: Date.now() - startedAt
+      });
+    }
+  }
+
+  return {
+    ok: false,
+    source: "wxcc-analyzer-queue-all-fields-report",
+    reportId: QUEUE_ALL_FIELDS_REPORT_ID,
+    analyzerBaseUrl: ANALYZER_BASE_URL,
+    durationFilter,
+    attempts
+  };
+}
+
 app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
   const requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
   const startedAt = Date.now();
@@ -1953,6 +2172,77 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       ? requestedQueues.filter(q => queueNameAllowed(q, allowedQueues))
       : allowedQueues;
 
+    const analyzerResult = await fetchQueueAllFieldsReportMetrics({
+      selectedQueues,
+      range: range.range,
+      requestId
+    });
+
+    if (analyzerResult.ok) {
+      const payload = {
+        ok: true,
+        backendBuildId: BUILD_ID,
+        requestId,
+        source: analyzerResult.source,
+        reportId: analyzerResult.reportId,
+        range: range.range,
+        durationFilter: analyzerResult.durationFilter,
+        from: range.from,
+        to: range.to,
+        generatedAt: new Date().toISOString(),
+        queues: selectedQueues,
+        metrics: analyzerResult.metrics,
+        reportFields: analyzerResult.selectedRow,
+        sample: {
+          source: "Queue All Fields Report",
+          durationMs: Date.now() - startedAt,
+          attempts: analyzerResult.attempts.map(a => ({
+            path: a.path,
+            method: a.method,
+            ok: a.ok,
+            status: a.status,
+            rowCount: a.rowCount || 0,
+            durationMs: a.durationMs
+          }))
+        },
+        notes: [
+          "KPI values are sourced from the WXCC Analyzer Queue All Fields Report where available.",
+          "Mapping: Average Queue Time -> Avg Wait, Maximum Queue Time -> Longest Waiting, Average Handled Time -> Avg Handle."
+        ]
+      };
+
+      addWidgetDiagLog("analytics-queue-all-fields-report-success", {
+        requestId,
+        range: payload.range,
+        durationFilter: payload.durationFilter,
+        queues: payload.queues,
+        reportFields: payload.reportFields,
+        metrics: payload.metrics,
+        sample: payload.sample
+      });
+
+      addWidgetDiagLog("analytics-queue-metrics-success", {
+        requestId,
+        source: payload.source,
+        range: payload.range,
+        queues: payload.queues,
+        metrics: payload.metrics,
+        reportFields: payload.reportFields,
+        sample: payload.sample
+      });
+
+      return res.json(payload);
+    }
+
+    addWidgetDiagLog("analytics-queue-all-fields-report-unavailable", {
+      requestId,
+      range: range.range,
+      queues: selectedQueues,
+      attempts: analyzerResult.attempts
+    });
+
+    // Fallback: keep the previous v53 taskDetails probe path available so the KPI cards remain usable
+    // while the exact Analyzer REST execution endpoint is being discovered.
     const sourceData = await getWallboardSourceData(true);
     const allTasks = Array.isArray(sourceData.allTasks) ? sourceData.allTasks : [];
 
@@ -1987,8 +2277,11 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       ok: true,
       backendBuildId: BUILD_ID,
       requestId,
-      source: "wxcc-reporting-taskDetails-probe",
+      source: "wxcc-reporting-taskDetails-fallback",
+      analyzerReportUnavailable: true,
+      analyzerAttempts: analyzerResult.attempts,
       range: range.range,
+      durationFilter: buildAnalyzerDurationFilter(range.range),
       from: range.from,
       to: range.to,
       generatedAt: new Date().toISOString(),
@@ -2007,17 +2300,19 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
         durationMs: Date.now() - startedAt
       },
       notes: [
-        "Analytics probe uses WXCC reporting taskDetails data from the backend.",
-        "If no completed task sample exists in the selected range, averages return 0 and frontend falls back only when probe fails."
+        "Analyzer Queue All Fields Report endpoint was not reachable with the configured candidates, so v53 taskDetails fallback was used.",
+        "Fallback is for diagnostics only; verify analyzerAttempts in the GUI log."
       ]
     };
 
     addWidgetDiagLog("analytics-queue-metrics-success", {
       requestId,
+      source: payload.source,
       range: payload.range,
       queues: payload.queues,
       metrics: payload.metrics,
-      sample: payload.sample
+      sample: payload.sample,
+      analyzerAttempts: analyzerResult.attempts
     });
 
     res.json(payload);
@@ -2032,7 +2327,7 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       backendBuildId: BUILD_ID,
       requestId,
       error: err?.message || String(err),
-      source: "wxcc-reporting-taskDetails-probe",
+      source: "wxcc-analyzer-queue-all-fields-report",
       range: range.range,
       generatedAt: new Date().toISOString()
     });
