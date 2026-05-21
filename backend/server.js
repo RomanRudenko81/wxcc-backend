@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v54-queue-all-fields-kpis-2026-05-21";
+const BUILD_ID = "wxcc-widget-v55-safe-queue-all-fields-kpi-probe-2026-05-21";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -1899,43 +1899,6 @@ function isWebhookSecretValid(req) {
 
   return String(headerSecret || querySecret || "") === WXCC_EVENT_WEBHOOK_SECRET;
 }
-
-
-function getMetricRange(rangeName = "60m") {
-  const now = Date.now();
-  const key = String(rangeName || "60m").toLowerCase();
-  if (key === "today") {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    return { range: "today", from: start.getTime(), to: now };
-  }
-  const minutesMatch = key.match(/^(\d+)m$/);
-  const minutes = minutesMatch ? Math.max(1, Math.min(24 * 60, Number(minutesMatch[1]))) : 60;
-  return { range: `${minutes}m`, from: now - minutes * 60 * 1000, to: now };
-}
-
-function metricDurationSeconds(value) {
-  const numeric = Number(value || 0);
-  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-  // WXCC taskDetails durations are normally milliseconds. If a very small value is ever returned,
-  // treat it as seconds to keep the probe defensive.
-  return numeric > 10000 ? Math.round(numeric / 1000) : Math.round(numeric);
-}
-
-function taskTimestampInRange(task = {}, from = 0, to = Date.now()) {
-  const timestamps = [task.createdTime, task.endedTime, task.lastActivityTime]
-    .map(v => Number(v || 0))
-    .filter(v => Number.isFinite(v) && v > 0);
-  if (!timestamps.length) return false;
-  return timestamps.some(ts => ts >= from && ts <= to);
-}
-
-function averageSeconds(values = []) {
-  const clean = values.map(v => Number(v)).filter(v => Number.isFinite(v) && v >= 0);
-  if (!clean.length) return 0;
-  return Math.round(clean.reduce((sum, v) => sum + v, 0) / clean.length);
-}
-
 
 const ANALYZER_BASE_URL = process.env.ANALYZER_BASE_URL || "https://analyzer-v2.wxcc-eu2.cisco.com";
 const QUEUE_ALL_FIELDS_REPORT_ID = process.env.QUEUE_ALL_FIELDS_REPORT_ID || "1268";
