@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-technical-diagnostics-2026-05-21-v35";
+const BUILD_ID = "wxcc-widget-backend-resilience-2026-05-21-v36";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 300;
@@ -273,8 +273,9 @@ async function updateEntryPoint(id, payload) {
   return safeJson(response);
 }
 
-async function postSearchQuery(query, variables = {}) {
+async function postSearchQuery(query, variables = {}, context = "search") {
   const token = await getValidServiceToken();
+  const startedAt = Date.now();
 
   const response = await fetch(`${WEBEX_BASE_URL}/search`, {
     method: "POST",
@@ -287,12 +288,40 @@ async function postSearchQuery(query, variables = {}) {
   });
 
   const text = await response.text();
+  const durationMs = Date.now() - startedAt;
 
   if (!response.ok) {
-    throw new Error(text);
+    const err = new Error(`WXCC search failed: ${response.status} ${response.statusText || ""}`.trim());
+    err.name = "WxccSearchError";
+    err.status = response.status;
+    err.statusText = response.statusText || "";
+    err.context = context;
+    err.durationMs = durationMs;
+    err.bodyPreview = String(text || "").slice(0, 1500);
+    err.variables = variables;
+
+    addWidgetDiagLog("wxcc-search-error", {
+      context,
+      status: err.status,
+      statusText: err.statusText,
+      durationMs,
+      bodyPreview: err.bodyPreview,
+      variables
+    });
+
+    throw err;
   }
 
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    const parseErr = new Error(`WXCC search JSON parse failed: ${err.message}`);
+    parseErr.name = "WxccSearchJsonParseError";
+    parseErr.context = context;
+    parseErr.durationMs = durationMs;
+    parseErr.bodyPreview = String(text || "").slice(0, 1500);
+    throw parseErr;
+  }
 }
 
 async function getAgentSessions() {
@@ -326,7 +355,8 @@ async function getAgentSessions() {
     {
       from: now - 86400000,
       to: now
-    }
+    },
+    "getAgentSessions"
   );
 
   return result?.data?.agentSession?.agentSessions || [];
@@ -890,20 +920,55 @@ async function getWallboardSourceData(force = false) {
     return wallboardDataCache.updating;
   }
 
-  wallboardDataCache.updating = Promise.all([
+  wallboardDataCache.updating = Promise.allSettled([
     getAgentSessions(),
     getTaskDetails()
   ])
-    .then(([allAgents, allTasks]) => {
-      wallboardDataCache.allAgents = allAgents;
-      wallboardDataCache.allTasks = allTasks;
+    .then(results => {
+      const [agentsResult, tasksResult] = results;
+      const errors = [];
+
+      if (agentsResult.status === "fulfilled") {
+        wallboardDataCache.allAgents = Array.isArray(agentsResult.value) ? agentsResult.value : [];
+      } else {
+        errors.push({ source: "getAgentSessions", error: agentsResult.reason });
+      }
+
+      if (tasksResult.status === "fulfilled") {
+        wallboardDataCache.allTasks = Array.isArray(tasksResult.value) ? tasksResult.value : [];
+      } else {
+        errors.push({ source: "getTaskDetails", error: tasksResult.reason });
+      }
+
+      const hasAnyUsableCache =
+        Array.isArray(wallboardDataCache.allAgents) && wallboardDataCache.allAgents.length > 0 ||
+        Array.isArray(wallboardDataCache.allTasks) && wallboardDataCache.allTasks.length > 0;
+
+      if (errors.length) {
+        const errorSummary = errors.map(e => ({
+          source: e.source,
+          name: e.error?.name || "Error",
+          message: e.error?.message || String(e.error || ""),
+          status: e.error?.status || null,
+          context: e.error?.context || "",
+          bodyPreview: e.error?.bodyPreview ? String(e.error.bodyPreview).slice(0, 500) : ""
+        }));
+
+        wallboardDataCache.error = errorSummary;
+        addWidgetDiagLog("wallboard-source-partial-failure", { errors: errorSummary });
+
+        if (!hasAnyUsableCache) {
+          const err = new Error("wallboard source data unavailable");
+          err.name = "WallboardSourceUnavailable";
+          err.errors = errorSummary;
+          throw err;
+        }
+      } else {
+        wallboardDataCache.error = null;
+      }
+
       wallboardDataCache.updatedAt = Date.now();
-      wallboardDataCache.error = null;
       return wallboardDataCache;
-    })
-    .catch(err => {
-      wallboardDataCache.error = err;
-      throw err;
     })
     .finally(() => {
       wallboardDataCache.updating = null;
