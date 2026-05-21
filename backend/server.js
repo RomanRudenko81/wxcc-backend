@@ -48,10 +48,10 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-backend-resilience-2026-05-21-v36";
+const BUILD_ID = "wxcc-widget-architecture-concurrency-2026-05-21-v37";
 
 const widgetDiagLog = [];
-const WIDGET_DIAG_LOG_MAX = 300;
+const WIDGET_DIAG_LOG_MAX = 500;
 
 function addWidgetDiagLog(type, details = {}) {
   const entry = { ts: Date.now(), iso: new Date().toISOString(), type, ...details };
@@ -857,11 +857,15 @@ const SSE_HEARTBEAT_MS = Number(process.env.SSE_HEARTBEAT_MS || 25000);
 const WXCC_EVENT_WEBHOOK_SECRET = process.env.WXCC_EVENT_WEBHOOK_SECRET || "";
 const EVENT_REFRESH_DEBOUNCE_MS = Number(process.env.EVENT_REFRESH_DEBOUNCE_MS || 1200);
 const EVENT_REFRESH_RETRY_DELAYS_MS = String(
-  process.env.EVENT_REFRESH_RETRY_DELAYS_MS || "1000,3000,7000,15000"
+  process.env.EVENT_REFRESH_RETRY_DELAYS_MS || "0,2500,6500"
 )
   .split(",")
   .map(v => Number(v.trim()))
   .filter(v => Number.isFinite(v) && v >= 0);
+
+const WALLBOARD_EVENT_STATE_TTL_MS = Number(process.env.WALLBOARD_EVENT_STATE_TTL_MS || 120000);
+const WALLBOARD_MIN_PUBLISH_HISTORY_GRACE_MS = Number(process.env.WALLBOARD_MIN_PUBLISH_HISTORY_GRACE_MS || 120000);
+const WALLBOARD_REFRESH_MIN_GAP_MS = Number(process.env.WALLBOARD_REFRESH_MIN_GAP_MS || 750);
 
 const WXCC_SUBSCRIPTION_TARGET_URL =
   process.env.WXCC_SUBSCRIPTION_TARGET_URL ||
@@ -889,6 +893,12 @@ const WXCC_EVENT_TYPES_ENDPOINTS = String(
 const wallboardSseClients = new Set();
 let lastWxccEvent = null;
 let eventRefreshTimer = null;
+let eventRefreshGeneration = 0;
+let wallboardRefreshInFlight = false;
+let wallboardRefreshPending = false;
+let wallboardRefreshPendingReason = "";
+let wallboardLastRefreshRunTs = 0;
+const agentEventStateCache = new Map();
 let taskLegTerminationCache = {
   ts: 0,
   map: new Map(),
@@ -904,6 +914,123 @@ let wallboardDataCache = {
   updating: null,
   error: null
 };
+
+function normalizeWxccEventBody(body = {}) {
+  const type = body?.type || body?.eventType || body?.data?.type || "";
+  const data = body?.data || body?.event?.data || body?.payload || {};
+  return { type: String(type || ""), data };
+}
+
+function rememberAgentStateFromWxccEvent(body = {}) {
+  const normalized = normalizeWxccEventBody(body);
+  if (normalized.type !== "agent:state_change") return;
+
+  const data = normalized.data || {};
+  const agentId = String(data.agentId || "");
+  const currentState = String(data.currentState || "").toLowerCase();
+  if (!agentId || !currentState) return;
+
+  // Only override states that are explicit and reliable in the webhook event.
+  // For custom idle codes, the Search API remains the source of truth for the display name.
+  const displayStateByEventState = {
+    available: "Available",
+    ringing: "Ringing",
+    connected: "Connected",
+    wrapup: "Wrapup",
+    "wrapup-done": "Available"
+  };
+
+  const displayState = displayStateByEventState[currentState];
+  if (!displayState) return;
+
+  agentEventStateCache.set(agentId, {
+    agentId,
+    currentState,
+    displayState,
+    connectedChannels: Array.isArray(data.connectedChannels) ? data.connectedChannels : [],
+    idleCodeId: data.idleCodeId || "",
+    taskId: data.taskId || "",
+    createdTime: data.createdTime || null,
+    receivedAtMs: Date.now()
+  });
+
+  addWidgetDiagLog("agent-event-state-cache-updated", {
+    agentId,
+    currentState,
+    displayState,
+    taskId: data.taskId || ""
+  });
+}
+
+function getFreshAgentEventOverride(agentId) {
+  const id = String(agentId || "");
+  if (!id) return null;
+
+  const cached = agentEventStateCache.get(id);
+  if (!cached) return null;
+
+  const ageMs = Date.now() - cached.receivedAtMs;
+  if (ageMs > WALLBOARD_EVENT_STATE_TTL_MS) {
+    agentEventStateCache.delete(id);
+    return null;
+  }
+
+  return { ...cached, ageMs };
+}
+
+function applyAgentEventOverrides(payload = {}) {
+  const list = Array.isArray(payload.agentList) ? payload.agentList : [];
+  let applied = 0;
+
+  for (const agent of list) {
+    const override = getFreshAgentEventOverride(agent.agentId || agent.id);
+    if (!override) continue;
+
+    const sourceState = String(agent.state || "");
+    agent.state = override.displayState;
+    agent.currentState = override.currentState;
+    agent.eventOverride = {
+      applied: true,
+      sourceState,
+      eventState: override.currentState,
+      ageMs: override.ageMs
+    };
+    applied += 1;
+  }
+
+  if (payload.agents && Array.isArray(payload.agentList)) {
+    payload.agents.loggedIn = payload.agentList.length;
+    payload.agents.available = payload.agentList.filter(agent =>
+      String(agent.state || "").toLowerCase() === "available"
+    ).length;
+  }
+
+  if (applied) {
+    addWidgetDiagLog("agent-event-state-overrides-applied", { applied });
+  }
+
+  return payload;
+}
+
+function mergeStableListsForPublish(payload = {}, previousPayload = null) {
+  if (!previousPayload) return payload;
+
+  const previousHistory = Array.isArray(previousPayload.callHistoryList) ? previousPayload.callHistoryList : [];
+  const nextHistory = Array.isArray(payload.callHistoryList) ? payload.callHistoryList : [];
+  const previousTs = Number(previousPayload.__publishedAtMs || 0);
+  const ageMs = previousTs ? Date.now() - previousTs : Number.MAX_SAFE_INTEGER;
+
+  if (previousHistory.length > 0 && nextHistory.length === 0 && ageMs < WALLBOARD_MIN_PUBLISH_HISTORY_GRACE_MS) {
+    payload.callHistoryList = previousHistory;
+    payload.__historyPreservedServerSide = true;
+    addWidgetDiagLog("server-history-preserved", {
+      preservedRows: previousHistory.length,
+      ageMs
+    });
+  }
+
+  return payload;
+}
 
 async function getWallboardSourceData(force = false) {
   const now = Date.now();
@@ -968,6 +1095,12 @@ async function getWallboardSourceData(force = false) {
       }
 
       wallboardDataCache.updatedAt = Date.now();
+      addWidgetDiagLog("wallboard-source-data-updated", {
+        force,
+        agents: Array.isArray(wallboardDataCache.allAgents) ? wallboardDataCache.allAgents.length : 0,
+        tasks: Array.isArray(wallboardDataCache.allTasks) ? wallboardDataCache.allTasks.length : 0,
+        partialError: errors.length > 0
+      });
       return wallboardDataCache;
     })
     .finally(() => {
@@ -1204,7 +1337,7 @@ async function buildWallboardPayload(session, forceRefresh = false) {
     String(getDisplayState(a)).toLowerCase() === "available"
   );
 
-  return {
+  const payload = {
     ok: true,
     source: "webex-search-api",
     delivery: "sse-ready",
@@ -1234,6 +1367,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       const channel = getPrimaryChannelInfo(agent);
 
       return {
+        id: agent.agentId || "",
+        agentId: agent.agentId || "",
         name: agent.agentName || "",
         login: agent.userLoginId || "",
         state: getDisplayState(agent),
@@ -1319,6 +1454,9 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       };
     })
   };
+
+  payload.__publishedAtMs = Date.now();
+  return applyAgentEventOverrides(payload);
 }
 
 function writeSseEvent(res, eventName, payload) {
@@ -1338,62 +1476,133 @@ function broadcastSseEvent(eventName, payload) {
 
 async function pushWallboardUpdateToClient(client, force = false) {
   try {
-    const payload = await buildWallboardPayload(client.session, force);
+    let payload = await buildWallboardPayload(client.session, force);
+    payload = mergeStableListsForPublish(payload, client.lastPayloadObj || lastGoodWallboardPayload);
+    payload.__publishedAtMs = Date.now();
+
     const serialized = JSON.stringify(payload);
 
     if (serialized !== client.lastPayload || force) {
       client.lastPayload = serialized;
+      client.lastPayloadObj = payload;
+      lastGoodWallboardPayload = payload;
+      lastGoodWallboardPayloadTs = Date.now();
       writeSseEvent(client.res, "wallboard", payload);
     }
   } catch (err) {
+    // Keep the SSE connection alive. The frontend can fetch /api/wallboard as fallback.
     writeSseEvent(client.res, "wallboard-error", {
       ok: false,
       error: err.message,
+      name: err.name || "Error",
       generatedAt: new Date().toISOString()
     });
   }
 }
 
-function scheduleEventDrivenWallboardRefresh(reason = "wxcc-event") {
-  if (eventRefreshTimer) {
-    clearTimeout(eventRefreshTimer);
+
+async function runQueuedWallboardRefresh(reason = "wxcc-event") {
+  if (wallboardRefreshInFlight) {
+    wallboardRefreshPending = true;
+    wallboardRefreshPendingReason = wallboardRefreshPendingReason
+      ? `${wallboardRefreshPendingReason},${reason}`
+      : reason;
+    addWidgetDiagLog("wallboard-refresh-coalesced", { reason, pendingReason: wallboardRefreshPendingReason });
+    return;
   }
 
-  const pushFreshWallboard = async refreshReason => {
-    try {
+  wallboardRefreshInFlight = true;
+  let currentReason = reason;
+
+  try {
+    do {
+      wallboardRefreshPending = false;
+      wallboardRefreshPendingReason = "";
+
+      const sinceLastRunMs = Date.now() - wallboardLastRefreshRunTs;
+      if (sinceLastRunMs < WALLBOARD_REFRESH_MIN_GAP_MS) {
+        await new Promise(resolve => setTimeout(resolve, WALLBOARD_REFRESH_MIN_GAP_MS - sinceLastRunMs));
+      }
+
+      const startedAt = Date.now();
+      addWidgetDiagLog("wallboard-refresh-run-start", {
+        reason: currentReason,
+        clients: wallboardSseClients.size
+      });
+
       await getWallboardSourceData(true);
 
       for (const client of wallboardSseClients) {
         await pushWallboardUpdateToClient(client, true);
       }
 
+      wallboardLastRefreshRunTs = Date.now();
+
       broadcastSseEvent("event-refresh", {
         ok: true,
-        reason: refreshReason,
+        reason: currentReason,
         generatedAt: new Date().toISOString(),
-        clientCount: wallboardSseClients.size
+        durationMs: Date.now() - startedAt,
+        clientCount: wallboardSseClients.size,
+        concurrencyMode: "single-flight-coalesced"
       });
-    } catch (err) {
-      broadcastSseEvent("wallboard-error", {
-        ok: false,
-        reason: refreshReason,
-        error: err.message,
-        generatedAt: new Date().toISOString()
+
+      addWidgetDiagLog("wallboard-refresh-run-complete", {
+        reason: currentReason,
+        durationMs: Date.now() - startedAt,
+        clients: wallboardSseClients.size
       });
-    }
-  };
+
+      currentReason = wallboardRefreshPendingReason || "coalesced-wxcc-events";
+    } while (wallboardRefreshPending);
+  } catch (err) {
+    addWidgetDiagLog("wallboard-refresh-run-error", {
+      reason: currentReason,
+      error: err?.stack || err?.message || String(err)
+    });
+
+    broadcastSseEvent("wallboard-error", {
+      ok: false,
+      reason: currentReason,
+      error: err.message,
+      generatedAt: new Date().toISOString(),
+      concurrencyMode: "single-flight-coalesced"
+    });
+  } finally {
+    wallboardRefreshInFlight = false;
+  }
+}
+
+function scheduleEventDrivenWallboardRefresh(reason = "wxcc-event") {
+  eventRefreshGeneration += 1;
+  const generation = eventRefreshGeneration;
+
+  if (eventRefreshTimer) {
+    clearTimeout(eventRefreshTimer);
+  }
 
   eventRefreshTimer = setTimeout(() => {
-    // WXCC sometimes publishes the webhook before the Search/State APIs are fully consistent.
-    // Therefore we do an event-triggered retry burst. This is not continuous polling:
-    // it only runs after a real WXCC event was received.
+    // WXCC events can arrive before Search/State APIs are consistent.
+    // v37 keeps the consistency checks but runs them single-flight and coalesced,
+    // preventing retry-1..4 from overwriting each other out of order.
     EVENT_REFRESH_RETRY_DELAYS_MS.forEach((delay, index) => {
       setTimeout(() => {
-        pushFreshWallboard(`${reason}:retry-${index + 1}`);
+        if (generation !== eventRefreshGeneration) {
+          addWidgetDiagLog("wallboard-refresh-skipped-old-generation", {
+            reason,
+            retry: index + 1,
+            generation,
+            currentGeneration: eventRefreshGeneration
+          });
+          return;
+        }
+
+        runQueuedWallboardRefresh(`${reason}:retry-${index + 1}`);
       }, delay);
     });
   }, EVENT_REFRESH_DEBOUNCE_MS);
 }
+
 
 function isWebhookSecretValid(req) {
   if (!WXCC_EVENT_WEBHOOK_SECRET) return true;
@@ -1558,6 +1767,8 @@ app.post("/api/wxcc/events", (req, res) => {
     body: req.body || {}
   };
 
+  rememberAgentStateFromWxccEvent(lastWxccEvent.body);
+
   broadcastSseEvent("wxcc-event", {
     ok: true,
     receivedAt: lastWxccEvent.receivedAt,
@@ -1610,6 +1821,15 @@ app.get("/api/debug/events", requireSession, (req, res) => {
     fallbackRefreshMs: WALLBOARD_FALLBACK_POLLING_ENABLED ? WALLBOARD_DATA_CACHE_TTL_MS : null,
     eventRefreshDebounceMs: EVENT_REFRESH_DEBOUNCE_MS,
     eventRefreshRetryDelaysMs: EVENT_REFRESH_RETRY_DELAYS_MS,
+    concurrency: {
+      mode: "single-flight-coalesced",
+      inFlight: wallboardRefreshInFlight,
+      pending: wallboardRefreshPending,
+      pendingReason: wallboardRefreshPendingReason,
+      generation: eventRefreshGeneration,
+      lastRunAt: wallboardLastRefreshRunTs ? new Date(wallboardLastRefreshRunTs).toISOString() : null,
+      agentEventStateCacheSize: agentEventStateCache.size
+    },
     webhookSecretConfigured: Boolean(WXCC_EVENT_WEBHOOK_SECRET)
   });
 });
