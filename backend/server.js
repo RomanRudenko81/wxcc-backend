@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v44-persistent-active-call-eviction-2026-05-21";
+const BUILD_ID = "wxcc-widget-v45-deterministic-agent-projection-2026-05-21";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
