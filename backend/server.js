@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-hard-lifecycle-isolation-2026-05-21-v40";
+const BUILD_ID = "wxcc-widget-v41-active-call-reconstruction-2026-05-21";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -953,6 +953,219 @@ let taskLegTerminationCache = {
 const TASK_LEG_TERMINATION_CACHE_TTL_MS = Number(process.env.TASK_LEG_TERMINATION_CACHE_TTL_MS || 15000);
 let lastTaskDetailsQueryVariant = "base";
 
+
+const ACTIVE_CALL_EVENT_CACHE_TTL_MS = Number(process.env.ACTIVE_CALL_EVENT_CACHE_TTL_MS || 600000);
+const ACTIVE_CALL_EVENT_EVICTION_DELAY_MS = Number(process.env.ACTIVE_CALL_EVENT_EVICTION_DELAY_MS || 30000);
+const activeCallEventCache = new Map();
+
+function getEventTaskId(data = {}) {
+  return String(
+    data.taskId ||
+    data.interactionId ||
+    data.contactId ||
+    data.contactSessionId ||
+    data.id ||
+    ""
+  );
+}
+
+function getEventAgentId(data = {}) {
+  return String(data.agentId || data.ownerId || data.userId || data.ciUserId || "");
+}
+
+function getEventQueueName(data = {}) {
+  const q = data.queue || data.lastQueue || data.firstQueue || data.queueInfo || {};
+  return String(
+    data.queueName || data.lastQueueName || data.firstQueueName ||
+    q.name || q.queueName || q.displayName || ""
+  );
+}
+
+function getEventCaller(data = {}) {
+  return String(data.origin || data.from || data.ani || data.caller || data.customerNumber || data.customerAni || "");
+}
+
+function getEventDestination(data = {}) {
+  return String(data.destination || data.to || data.dnis || data.calledNumber || "");
+}
+
+function pruneActiveCallEventCache() {
+  const now = Date.now();
+  for (const [id, call] of activeCallEventCache.entries()) {
+    const lastSeen = Number(call.lastSeenMs || call.createdAtMs || 0);
+    const endedAt = Number(call.endedAtMs || 0);
+    if ((endedAt && now - endedAt > ACTIVE_CALL_EVENT_EVICTION_DELAY_MS) || (lastSeen && now - lastSeen > ACTIVE_CALL_EVENT_CACHE_TTL_MS)) {
+      activeCallEventCache.delete(id);
+    }
+  }
+}
+
+function rememberActiveCallFromWxccEvent(body = {}) {
+  const normalized = normalizeWxccEventBody(body);
+  const type = String(normalized.type || "");
+  const data = normalized.data || {};
+  const state = String(data.currentState || data.state || data.status || "").toLowerCase();
+  const taskId = getEventTaskId(data);
+  const agentId = getEventAgentId(data);
+
+  if (!taskId && !agentId) return;
+
+  const isConnected = type === "agent:state_change" && state === "connected";
+  const isTerminal = type === "agent:state_change" && ["available", "idle", "wrapup", "wrapup-done", "ended", "terminated", "disconnected"].includes(state);
+
+  if (!isConnected && !isTerminal) return;
+
+  const now = Date.now();
+  const id = taskId || `agent-${agentId}`;
+  const existing = activeCallEventCache.get(id) || {};
+
+  if (isConnected) {
+    activeCallEventCache.set(id, {
+      ...existing,
+      id,
+      taskId: taskId || existing.taskId || id,
+      agentId: agentId || existing.agentId || "",
+      agent: data.agentName || data.agentDisplayName || data.name || existing.agent || "",
+      caller: getEventCaller(data) || existing.caller || "",
+      destination: getEventDestination(data) || existing.destination || "",
+      queue: getEventQueueName(data) || existing.queue || "",
+      firstQueue: data.firstQueueName || existing.firstQueue || "",
+      entryPoint: data.entryPointName || data.lastEntryPointName || existing.entryPoint || "",
+      status: "connected",
+      channelType: data.channelType || existing.channelType || "telephony",
+      createdTime: existing.createdTime || data.createdTime || data.connectedTime || now,
+      connectedStartTime: existing.connectedStartTime || data.connectedTime || data.createdTime || now,
+      lastActivityTime: data.lastActivityTime || data.createdTime || now,
+      handleBaseTimestamp: now,
+      handleSeconds: Math.max(0, Math.floor((now - Number(existing.connectedStartTime || data.connectedTime || data.createdTime || now)) / 1000)),
+      reconstructedSource: "wxcc-agent-state-event",
+      eventState: state,
+      lastSeenMs: now,
+      endedAtMs: 0
+    });
+
+    addWidgetDiagLog("active-call-event-cache-connected", { id, taskId, agentId, state, cacheSize: activeCallEventCache.size });
+    return;
+  }
+
+  if (isTerminal) {
+    const markEnded = call => {
+      activeCallEventCache.set(call.id, {
+        ...call,
+        eventState: state,
+        endedAtMs: now,
+        lastSeenMs: now,
+        evictionDueAtMs: now + ACTIVE_CALL_EVENT_EVICTION_DELAY_MS
+      });
+    };
+
+    if (taskId && activeCallEventCache.has(taskId)) {
+      markEnded(activeCallEventCache.get(taskId));
+    } else if (agentId) {
+      for (const call of activeCallEventCache.values()) {
+        if (String(call.agentId || "") === agentId && !call.endedAtMs) markEnded(call);
+      }
+    }
+
+    addWidgetDiagLog("active-call-event-cache-terminal", { taskId, agentId, state, cacheSize: activeCallEventCache.size });
+  }
+
+  pruneActiveCallEventCache();
+}
+
+function enrichActiveCallEventCacheFromTasks(tasks = []) {
+  const now = Date.now();
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const id = String(task?.id || task?.taskId || "");
+    if (!id) continue;
+    const status = String(task?.status || "").toLowerCase();
+
+    if (status === "connected") {
+      const existing = activeCallEventCache.get(id) || {};
+      activeCallEventCache.set(id, {
+        ...existing,
+        id,
+        taskId: id,
+        status: "connected",
+        caller: task.origin || existing.caller || "",
+        destination: task.destination || existing.destination || "",
+        queue: task?.lastQueue?.name || task?.firstQueueName || existing.queue || "",
+        firstQueue: task?.firstQueueName || existing.firstQueue || "",
+        entryPoint: task?.lastEntryPoint?.name || existing.entryPoint || "",
+        agent: task?.lastAgent?.name || existing.agent || "",
+        createdTime: task.createdTime || existing.createdTime || now,
+        connectedStartTime: task.lastActivityTime || task.createdTime || existing.connectedStartTime || now,
+        lastActivityTime: task.lastActivityTime || existing.lastActivityTime || now,
+        queueDuration: task.queueDuration || existing.queueDuration || 0,
+        connectedDuration: task.connectedDuration || existing.connectedDuration || 0,
+        handleBaseTimestamp: now,
+        handleSeconds: getLiveTaskSeconds(task),
+        reconstructedSource: existing.reconstructedSource || "wxcc-taskdetails-enriched",
+        lastSeenMs: now,
+        endedAtMs: 0
+      });
+    } else if (activeCallEventCache.has(id)) {
+      const existing = activeCallEventCache.get(id);
+      activeCallEventCache.set(id, { ...existing, endedAtMs: existing.endedAtMs || now, lastSeenMs: now });
+    }
+  }
+  pruneActiveCallEventCache();
+}
+
+function mergeConnectedTasksWithEventCache(connectedTasks = [], agents = [], allowedQueues = []) {
+  pruneActiveCallEventCache();
+  const byId = new Map();
+  const now = Date.now();
+
+  for (const task of Array.isArray(connectedTasks) ? connectedTasks : []) {
+    const id = String(task?.id || task?.taskId || "");
+    if (id) byId.set(id, task);
+  }
+
+  const agentById = new Map((Array.isArray(agents) ? agents : []).map(agent => [String(agent.agentId || agent.id || ""), agent]));
+
+  for (const cached of activeCallEventCache.values()) {
+    if (!cached || cached.endedAtMs) continue;
+    const id = String(cached.taskId || cached.id || "");
+    if (!id || byId.has(id)) continue;
+
+    const agent = agentById.get(String(cached.agentId || ""));
+    const queueName = cached.queue || (Array.isArray(allowedQueues) && allowedQueues.length === 1 ? allowedQueues[0] : "");
+
+    byId.set(id, {
+      id,
+      status: "connected",
+      channelType: "telephony",
+      isActive: true,
+      origin: cached.caller || "",
+      destination: cached.destination || "",
+      createdTime: cached.createdTime || cached.connectedStartTime || cached.lastSeenMs || now,
+      lastActivityTime: cached.connectedStartTime || cached.createdTime || cached.lastSeenMs || now,
+      queueDuration: cached.queueDuration || 0,
+      connectedDuration: cached.connectedDuration || 0,
+      totalDuration: 0,
+      lastQueue: { id: "", name: queueName },
+      firstQueueName: cached.firstQueue || queueName,
+      lastEntryPoint: { id: "", name: cached.entryPoint || "" },
+      lastAgent: { id: cached.agentId || "", name: cached.agent || agent?.agentName || agent?.name || "" },
+      reconstructed: true,
+      reconstructedSource: cached.reconstructedSource || "event-cache",
+      handleBaseTimestamp: now,
+      handleSeconds: Math.max(0, Math.floor((now - Number(cached.connectedStartTime || cached.createdTime || cached.lastSeenMs || now)) / 1000))
+    });
+  }
+
+  const merged = Array.from(byId.values());
+  if (merged.length !== connectedTasks.length) {
+    addWidgetDiagLog("active-call-reconstruction-merged", {
+      taskDetailsConnected: connectedTasks.length,
+      mergedConnected: merged.length,
+      eventCacheSize: activeCallEventCache.size
+    });
+  }
+  return merged;
+}
+
 let wallboardDataCache = {
   updatedAt: 0,
   allAgents: [],
@@ -1333,6 +1546,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
   const telephonyTasks = allTasks
     .filter(t => String(t.channelType).toLowerCase() === "telephony");
 
+  enrichActiveCallEventCacheFromTasks(telephonyTasks);
+
   const allowedQueueTasks = telephonyTasks
     .filter(t => queueNameAllowed(getQueueNameFromTask(t), allowedQueues));
 
@@ -1340,9 +1555,11 @@ async function buildWallboardPayload(session, forceRefresh = false) {
     .filter(t => t?.isActive === true)
     .filter(t => ["new", "parked"].includes(String(t.status).toLowerCase()));
 
-  const connectedTasks = allowedQueueTasks.filter(
+  let connectedTasks = allowedQueueTasks.filter(
     t => String(t.status).toLowerCase() === "connected"
   );
+
+  connectedTasks = mergeConnectedTasksWithEventCache(connectedTasks, agents, allowedQueues);
 
   // Call history for the currently allowed voice queues.
   // getTaskDetails() already queries the last 24 hours.
@@ -1387,6 +1604,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
     ok: true,
     source: "webex-search-api",
     delivery: "sse-ready",
+    activeCallReconstruction: true,
+    activeCallEventCacheSize: activeCallEventCache.size,
     queueSource: access.source,
     queueAccessError: access.error,
     userProfileId: access.user?.userProfileId || null,
@@ -1435,6 +1654,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
       return {
         id: task.id,
         status: task.status,
+        reconstructed: task.reconstructed === true,
+        reconstructedSource: task.reconstructedSource || "",
         caller: task.origin || "",
         queue: task?.lastQueue?.name || "",
         firstQueue: task?.firstQueueName || "",
@@ -1445,8 +1666,8 @@ async function buildWallboardPayload(session, forceRefresh = false) {
         queueDuration: task.queueDuration || 0,
         connectedDuration: task.connectedDuration || 0,
         connectedStartTime: task.lastActivityTime || task.createdTime || null,
-        liveHandleSeconds,
-        handleSeconds: connectedSeconds > 0 ? connectedSeconds : liveHandleSeconds,
+        liveHandleSeconds: task.liveHandleSeconds || liveHandleSeconds,
+        handleSeconds: Number(task.handleSeconds || 0) > 0 ? Number(task.handleSeconds) : (connectedSeconds > 0 ? connectedSeconds : liveHandleSeconds),
         handleBaseTimestamp: Date.now(),
         wrapupReason: getWrapupReasonFromTask(task),
         terminationReason: terminationByTaskId.get(task.id)?.terminationReason || "",
@@ -1814,6 +2035,7 @@ app.post("/api/wxcc/events", (req, res) => {
   };
 
   rememberAgentStateFromWxccEvent(lastWxccEvent.body);
+  rememberActiveCallFromWxccEvent(lastWxccEvent.body);
 
   broadcastSseEvent("wxcc-event", {
     ok: true,
