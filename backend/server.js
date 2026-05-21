@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-architecture-concurrency-2026-05-21-v37";
+const BUILD_ID = "wxcc-widget-lifecycle-entrypoint-resilience-2026-05-21-v38";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 500;
@@ -101,6 +101,9 @@ let tokenStore = {
   accessToken: null,
   expiresAt: 0
 };
+
+let lastGoodEntryPointById = new Map();
+let lastEntryPointErrorById = new Map();
 
 function safeCompare(a, b) {
   const aBuf = Buffer.from(a);
@@ -507,12 +510,54 @@ app.post("/api/session/bootstrap", (req, res) => {
 });
 
 app.get("/api/entrypoint/:id", requireSession, async (req, res) => {
+  const id = req.params.id;
+  const requestId = crypto.randomUUID();
+  const startedAt = Date.now();
+
   try {
-    const data = await getEntryPoint(req.params.id);
-    res.json(data);
+    const data = await getEntryPoint(id);
+    lastGoodEntryPointById.set(id, {
+      data,
+      cachedAt: Date.now()
+    });
+    lastEntryPointErrorById.delete(id);
+    res.json({
+      ...data,
+      backendBuildId: BUILD_ID,
+      requestId,
+      configStale: false
+    });
   } catch (err) {
-    res.status(500).json({
-      error: err.message
+    const errorInfo = {
+      message: err?.message || String(err),
+      stack: err?.stack ? String(err.stack).slice(0, 1200) : "",
+      durationMs: Date.now() - startedAt
+    };
+    lastEntryPointErrorById.set(id, { ...errorInfo, failedAt: Date.now() });
+    addWidgetDiagLog("entrypoint-get-failed", { id, requestId, ...errorInfo });
+
+    const cached = lastGoodEntryPointById.get(id);
+    if (cached?.data) {
+      return res.json({
+        ...cached.data,
+        backendBuildId: BUILD_ID,
+        requestId,
+        configStale: true,
+        configStaleReason: "entrypoint-get-failed-cache-used",
+        cachedAt: cached.cachedAt,
+        lastError: errorInfo.message
+      });
+    }
+
+    // No cache exists yet. Return 503 instead of a generic 500 so the frontend
+    // treats entrypoint config as temporarily unavailable and keeps wallboard alive.
+    res.status(503).json({
+      error: errorInfo.message,
+      backendBuildId: BUILD_ID,
+      requestId,
+      configStale: true,
+      configStaleReason: "entrypoint-get-failed-no-cache",
+      durationMs: errorInfo.durationMs
     });
   }
 });
@@ -522,7 +567,8 @@ app.put("/api/entrypoint/:id", requireSession, requireWriteRole, async (req, res
     const existing = await getEntryPoint(req.params.id);
     existing.flowOverrideSettings = req.body.flowOverrideSettings || [];
     const updated = await updateEntryPoint(req.params.id, existing);
-    res.json(updated);
+    lastGoodEntryPointById.set(req.params.id, { data: updated, cachedAt: Date.now() });
+    res.json({ ...updated, backendBuildId: BUILD_ID, configStale: false });
   } catch (err) {
     res.status(500).json({
       error: err.message
