@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v55-safe-queue-all-fields-kpi-probe-2026-05-21";
+const BUILD_ID = "wxcc-widget-v56-queue-all-fields-report-only-2026-05-21";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -2201,84 +2201,36 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       requestId,
       range: range.range,
       queues: selectedQueues,
+      durationFilter: buildAnalyzerDurationFilter(range.range),
       attempts: analyzerResult.attempts
     });
 
-    // Fallback: keep the previous v53 taskDetails probe path available so the KPI cards remain usable
-    // while the exact Analyzer REST execution endpoint is being discovered.
-    const sourceData = await getWallboardSourceData(true);
-    const allTasks = Array.isArray(sourceData.allTasks) ? sourceData.allTasks : [];
-
-    const queueTasks = allTasks
-      .filter(t => String(t.channelType || "").toLowerCase() === "telephony")
-      .filter(t => selectedQueues.some(q => normalizeText(q) === normalizeText(getQueueNameFromTask(t))))
-      .filter(t => taskTimestampInRange(t, range.from, range.to));
-
-    const currentWaitingTasks = queueTasks
-      .filter(t => t?.isActive === true)
-      .filter(t => ["new", "parked"].includes(String(t.status || "").toLowerCase()));
-
-    const completedOrConnectedTasks = queueTasks.filter(t => {
-      const status = String(t.status || "").toLowerCase();
-      return ["connected", "ended", "wrapup", "completed"].includes(status) || t.isContactHandled === true || Number(t.endedTime || 0) > 0;
-    });
-
-    const waitDurations = completedOrConnectedTasks
-      .map(t => metricDurationSeconds(t.queueDuration))
-      .filter(v => v >= 0);
-
-    const handleDurations = completedOrConnectedTasks
-      .map(t => metricDurationSeconds(t.connectedDuration || t.totalDuration))
-      .filter(v => v > 0);
-
-    const now = Date.now();
-    const currentWaitingSeconds = currentWaitingTasks
-      .map(t => t.createdTime ? Math.max(0, Math.floor((now - Number(t.createdTime)) / 1000)) : 0)
-      .filter(v => Number.isFinite(v) && v >= 0);
-
-    const payload = {
-      ok: true,
+    // v56: no TaskDetails fallback for these three KPI cards.
+    // They must only reflect the official Analyzer Queue All Fields Report fields.
+    return res.status(503).json({
+      ok: false,
       backendBuildId: BUILD_ID,
       requestId,
-      source: "wxcc-reporting-taskDetails-fallback",
+      source: "wxcc-analyzer-queue-all-fields-report",
+      reportId: QUEUE_ALL_FIELDS_REPORT_ID,
+      analyzerBaseUrl: ANALYZER_BASE_URL,
       analyzerReportUnavailable: true,
-      analyzerAttempts: analyzerResult.attempts,
       range: range.range,
       durationFilter: buildAnalyzerDurationFilter(range.range),
       from: range.from,
       to: range.to,
       generatedAt: new Date().toISOString(),
       queues: selectedQueues,
-      metrics: {
-        longestWaitingSeconds: currentWaitingSeconds.length ? Math.max(...currentWaitingSeconds) : 0,
-        avgWaitSeconds: waitDurations.length ? averageSeconds(waitDurations) : 0,
-        avgHandleSeconds: handleDurations.length ? averageSeconds(handleDurations) : 0
-      },
-      sample: {
-        taskCount: queueTasks.length,
-        waitingTaskCount: currentWaitingTasks.length,
-        completedOrConnectedTaskCount: completedOrConnectedTasks.length,
-        waitSampleCount: waitDurations.length,
-        handleSampleCount: handleDurations.length,
-        durationMs: Date.now() - startedAt
-      },
+      metrics: null,
+      reportFields: null,
+      attempts: analyzerResult.attempts,
       notes: [
-        "Analyzer Queue All Fields Report endpoint was not reachable with the configured candidates, so v53 taskDetails fallback was used.",
-        "Fallback is for diagnostics only; verify analyzerAttempts in the GUI log."
+        "v56 intentionally does not fall back to TaskDetails for Longest Waiting, Avg Wait or Avg Handle.",
+        "Expected Analyzer fields: Average Queue Time, Maximum Queue Time, Average Handled Time.",
+        "If this is unavailable, the frontend shows em dash KPI values and logs the analyzer attempts."
       ]
-    };
-
-    addWidgetDiagLog("analytics-queue-metrics-success", {
-      requestId,
-      source: payload.source,
-      range: payload.range,
-      queues: payload.queues,
-      metrics: payload.metrics,
-      sample: payload.sample,
-      analyzerAttempts: analyzerResult.attempts
     });
 
-    res.json(payload);
   } catch (err) {
     addWidgetDiagLog("analytics-queue-metrics-error", {
       requestId,
