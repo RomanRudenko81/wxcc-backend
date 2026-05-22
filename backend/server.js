@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v57-isolated-analytics-fetch-2026-05-22";
+const BUILD_ID = "wxcc-widget-v58-stable-sse-isolated-kpis-2026-05-22";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -1900,9 +1900,28 @@ function isWebhookSecretValid(req) {
   return String(headerSecret || querySecret || "") === WXCC_EVENT_WEBHOOK_SECRET;
 }
 
+
+
+// v58 isolated Analyzer KPI route. This endpoint is optional for the frontend and must not affect SSE/wallboard behavior.
 const ANALYZER_BASE_URL = process.env.ANALYZER_BASE_URL || "https://analyzer-v2.wxcc-eu2.cisco.com";
 const QUEUE_ALL_FIELDS_REPORT_ID = process.env.QUEUE_ALL_FIELDS_REPORT_ID || "1268";
-const ANALYZER_REQUEST_TIMEOUT_MS = Number(process.env.ANALYZER_REQUEST_TIMEOUT_MS || 7000);
+const ANALYZER_REQUEST_TIMEOUT_MS = Number(process.env.ANALYZER_REQUEST_TIMEOUT_MS || 8000);
+
+function getMetricRange(value = "60m") {
+  const key = String(value || "60m").toLowerCase();
+  const now = Date.now();
+  const berlinNow = new Date();
+  let from;
+  if (key === "today") {
+    // Server is UTC on Render; this approximation is sufficient for request metadata.
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    from = d.getTime();
+    return { range: "today", from, to: now };
+  }
+  if (key === "30m") return { range: "30m", from: now - 30 * 60 * 1000, to: now };
+  return { range: "60m", from: now - 60 * 60 * 1000, to: now };
+}
 
 function parseReportDurationSeconds(value) {
   if (value == null) return 0;
@@ -1910,10 +1929,8 @@ function parseReportDurationSeconds(value) {
     if (!Number.isFinite(value) || value <= 0) return 0;
     return value > 10000 ? Math.round(value / 1000) : Math.round(value);
   }
-
   const text = String(value || "").trim();
   if (!text) return 0;
-
   const parts = text.split(":").map(v => v.trim());
   if (parts.length >= 3) {
     const [h, m, secPart] = parts.slice(-3);
@@ -1921,16 +1938,12 @@ function parseReportDurationSeconds(value) {
     const total = Number(h) * 3600 + Number(m) * 60 + seconds;
     return Number.isFinite(total) && total > 0 ? Math.round(total) : 0;
   }
-
   const numeric = Number(text.replace(",", "."));
   return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : 0;
 }
 
 function normalizeReportKey(key = "") {
-  return String(key || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .trim();
+  return String(key || "").toLowerCase().replace(/[^a-z0-9]+/g, "").trim();
 }
 
 function metricFromObject(obj = {}, possibleKeys = []) {
@@ -1938,7 +1951,10 @@ function metricFromObject(obj = {}, possibleKeys = []) {
   const entries = Object.entries(obj);
   for (const wanted of possibleKeys) {
     const wantedNorm = normalizeReportKey(wanted);
-    const match = entries.find(([key]) => normalizeReportKey(key) === wantedNorm || normalizeReportKey(key).includes(wantedNorm));
+    const match = entries.find(([key]) => {
+      const normalized = normalizeReportKey(key);
+      return normalized === wantedNorm || normalized.includes(wantedNorm);
+    });
     if (match) return match[1];
   }
   return null;
@@ -1946,12 +1962,10 @@ function metricFromObject(obj = {}, possibleKeys = []) {
 
 function collectReportMetricRows(payload, rows = []) {
   if (!payload) return rows;
-
   if (Array.isArray(payload)) {
     payload.forEach(item => collectReportMetricRows(item, rows));
     return rows;
   }
-
   if (typeof payload !== "object") return rows;
 
   const avgQueue = metricFromObject(payload, ["Average Queue Time", "averageQueueTime", "avgQueueTime"]);
@@ -1978,7 +1992,6 @@ function collectReportMetricRows(payload, rows = []) {
   Object.values(payload).forEach(value => {
     if (value && typeof value === "object") collectReportMetricRows(value, rows);
   });
-
   return rows;
 }
 
@@ -1989,9 +2002,6 @@ function selectReportMetricRow(rows = [], selectedQueues = []) {
     const direct = rows.find(row => normalizedSelected.includes(normalizeText(row.queueName || "")));
     if (direct) return direct;
   }
-
-  // For a filtered Analyzer report there is often exactly one row. If multiple rows exist,
-  // combine by preferring the first row with an Average Handled Time value.
   return rows.find(row => row.avgHandled != null || row.avgQueue != null || row.maxQueue != null) || rows[0];
 }
 
@@ -2002,11 +2012,20 @@ function buildAnalyzerDurationFilter(range = "60m") {
   return { label: "Last 60 minutes", duration: "LAST_60_MINUTES", analyzerDuration: "Last 60 Minutes" };
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = ANALYZER_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "60m", requestId = "" } = {}) {
   const token = await getValidServiceToken();
   const durationFilter = buildAnalyzerDurationFilter(range);
   const queueName = selectedQueues.length === 1 ? selectedQueues[0] : "All";
-
   const payload = {
     cid: WEBEX_ORG_ID,
     orgId: WEBEX_ORG_ID,
@@ -2036,44 +2055,29 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
     { method: "POST", path: `/api/v1/reports/${QUEUE_ALL_FIELDS_REPORT_ID}/execute`, body: payload },
     { method: "POST", path: `/api/reporting/v1/reports/${QUEUE_ALL_FIELDS_REPORT_ID}/execute`, body: payload },
     { method: "POST", path: `/analyzer/api/report/execute`, body: payload },
-    { method: "POST", path: `/api/report/execute`, body: payload },
-    { method: "GET", path: `/analyzer/view/visualization?cid=${encodeURIComponent(WEBEX_ORG_ID)}&rId=${encodeURIComponent(QUEUE_ALL_FIELDS_REPORT_ID)}` }
+    { method: "POST", path: `/api/report/execute`, body: payload }
   ];
-
   const attempts = [];
 
   for (const candidate of candidates) {
     const url = `${ANALYZER_BASE_URL}${candidate.path}`;
     const startedAt = Date.now();
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => {
-        try { controller.abort(); } catch {}
-      }, ANALYZER_REQUEST_TIMEOUT_MS);
-
-      let response;
-      let text;
-      try {
-        response = await fetch(url, {
-          method: candidate.method,
-          signal: controller.signal,
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/json, text/plain, */*",
-            ...(candidate.method === "POST" ? { "Content-Type": "application/json" } : {})
-          },
-          ...(candidate.method === "POST" ? { body: JSON.stringify(candidate.body) } : {})
-        });
-        text = await response.text();
-      } finally {
-        clearTimeout(timeout);
-      }
+      const response = await fetchWithTimeout(url, {
+        method: candidate.method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json, text/plain, */*",
+          ...(candidate.method === "POST" ? { "Content-Type": "application/json" } : {})
+        },
+        ...(candidate.method === "POST" ? { body: JSON.stringify(candidate.body) } : {})
+      });
+      const text = await response.text();
       const contentType = response.headers.get("content-type") || "";
       let json = null;
       if (contentType.includes("json") || text.trim().startsWith("{") || text.trim().startsWith("[")) {
         try { json = JSON.parse(text); } catch {}
       }
-
       const rows = json ? collectReportMetricRows(json) : [];
       const selected = selectReportMetricRow(rows, selectedQueues);
       attempts.push({
@@ -2083,18 +2087,15 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
         status: response.status,
         contentType,
         durationMs: Date.now() - startedAt,
-        timeoutMs: ANALYZER_REQUEST_TIMEOUT_MS,
         rowCount: rows.length,
         preview: String(text || "").slice(0, 500)
       });
-
       if (response.ok && selected) {
         const metrics = {
           longestWaitingSeconds: parseReportDurationSeconds(selected.maxQueue),
           avgWaitSeconds: parseReportDurationSeconds(selected.avgQueue),
           avgHandleSeconds: parseReportDurationSeconds(selected.avgHandled)
         };
-
         return {
           ok: true,
           source: "wxcc-analyzer-queue-all-fields-report",
@@ -2112,50 +2113,24 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
         };
       }
     } catch (err) {
-      attempts.push({
-        path: candidate.path,
-        method: candidate.method,
-        ok: false,
-        error: err?.message || String(err),
-        durationMs: Date.now() - startedAt,
-        timeoutMs: ANALYZER_REQUEST_TIMEOUT_MS
-      });
+      attempts.push({ path: candidate.path, method: candidate.method, ok: false, error: err?.message || String(err), durationMs: Date.now() - startedAt });
     }
   }
 
-  return {
-    ok: false,
-    source: "wxcc-analyzer-queue-all-fields-report",
-    reportId: QUEUE_ALL_FIELDS_REPORT_ID,
-    analyzerBaseUrl: ANALYZER_BASE_URL,
-    durationFilter,
-    attempts
-  };
+  return { ok: false, source: "wxcc-analyzer-queue-all-fields-report", reportId: QUEUE_ALL_FIELDS_REPORT_ID, analyzerBaseUrl: ANALYZER_BASE_URL, durationFilter, attempts };
 }
 
 app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
   const requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
   const startedAt = Date.now();
   const range = getMetricRange(req.query?.range || "60m");
-
   try {
     const access = await getAllowedQueuesForSession(req.session || {});
     const allowedQueues = Array.isArray(access.allowedQueues) ? access.allowedQueues : [];
-    const requestedQueues = String(req.query?.queues || "")
-      .split(",")
-      .map(v => v.trim())
-      .filter(Boolean);
+    const requestedQueues = String(req.query?.queues || "").split(",").map(v => v.trim()).filter(Boolean);
+    const selectedQueues = requestedQueues.length ? requestedQueues.filter(q => queueNameAllowed(q, allowedQueues)) : allowedQueues;
 
-    const selectedQueues = requestedQueues.length
-      ? requestedQueues.filter(q => queueNameAllowed(q, allowedQueues))
-      : allowedQueues;
-
-    const analyzerResult = await fetchQueueAllFieldsReportMetrics({
-      selectedQueues,
-      range: range.range,
-      requestId
-    });
-
+    const analyzerResult = await fetchQueueAllFieldsReportMetrics({ selectedQueues, range: range.range, requestId });
     if (analyzerResult.ok) {
       const payload = {
         ok: true,
@@ -2174,41 +2149,17 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
         sample: {
           source: "Queue All Fields Report",
           durationMs: Date.now() - startedAt,
-          attempts: analyzerResult.attempts.map(a => ({
-            path: a.path,
-            method: a.method,
-            ok: a.ok,
-            status: a.status,
-            rowCount: a.rowCount || 0,
-            durationMs: a.durationMs
-          }))
-        },
-        notes: [
-          "KPI values are sourced from the WXCC Analyzer Queue All Fields Report where available.",
-          "Mapping: Average Queue Time -> Avg Wait, Maximum Queue Time -> Longest Waiting, Average Handled Time -> Avg Handle."
-        ]
+          attempts: analyzerResult.attempts.map(a => ({ path: a.path, method: a.method, ok: a.ok, status: a.status, rowCount: a.rowCount || 0, durationMs: a.durationMs }))
+        }
       };
-
       addWidgetDiagLog("analytics-queue-all-fields-report-success", {
         requestId,
         range: payload.range,
-        durationFilter: payload.durationFilter,
         queues: payload.queues,
         reportFields: payload.reportFields,
         metrics: payload.metrics,
         sample: payload.sample
       });
-
-      addWidgetDiagLog("analytics-queue-metrics-success", {
-        requestId,
-        source: payload.source,
-        range: payload.range,
-        queues: payload.queues,
-        metrics: payload.metrics,
-        reportFields: payload.reportFields,
-        sample: payload.sample
-      });
-
       return res.json(payload);
     }
 
@@ -2216,12 +2167,8 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       requestId,
       range: range.range,
       queues: selectedQueues,
-      durationFilter: buildAnalyzerDurationFilter(range.range),
       attempts: analyzerResult.attempts
     });
-
-    // v56: no TaskDetails fallback for these three KPI cards.
-    // They must only reflect the official Analyzer Queue All Fields Report fields.
     return res.status(503).json({
       ok: false,
       backendBuildId: BUILD_ID,
@@ -2238,31 +2185,14 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       queues: selectedQueues,
       metrics: null,
       reportFields: null,
-      attempts: analyzerResult.attempts,
-      notes: [
-        "v56 intentionally does not fall back to TaskDetails for Longest Waiting, Avg Wait or Avg Handle.",
-        "Expected Analyzer fields: Average Queue Time, Maximum Queue Time, Average Handled Time.",
-        "If this is unavailable, the frontend shows em dash KPI values and logs the analyzer attempts."
-      ]
+      attempts: analyzerResult.attempts
     });
-
   } catch (err) {
-    addWidgetDiagLog("analytics-queue-metrics-error", {
-      requestId,
-      error: err?.stack || err?.message || String(err),
-      durationMs: Date.now() - startedAt
-    });
-    res.status(500).json({
-      ok: false,
-      backendBuildId: BUILD_ID,
-      requestId,
-      error: err?.message || String(err),
-      source: "wxcc-analyzer-queue-all-fields-report",
-      range: range.range,
-      generatedAt: new Date().toISOString()
-    });
+    addWidgetDiagLog("analytics-queue-metrics-error", { requestId, error: err?.stack || err?.message || String(err), durationMs: Date.now() - startedAt });
+    res.status(500).json({ ok: false, backendBuildId: BUILD_ID, requestId, error: err?.message || String(err), source: "wxcc-analyzer-queue-all-fields-report" });
   }
 });
+
 
 app.get("/api/wallboard", requireSession, async (req, res) => {
   const requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
