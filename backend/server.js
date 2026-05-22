@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v56-queue-all-fields-report-only-2026-05-21";
+const BUILD_ID = "wxcc-widget-v57-isolated-analytics-fetch-2026-05-22";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -1902,6 +1902,7 @@ function isWebhookSecretValid(req) {
 
 const ANALYZER_BASE_URL = process.env.ANALYZER_BASE_URL || "https://analyzer-v2.wxcc-eu2.cisco.com";
 const QUEUE_ALL_FIELDS_REPORT_ID = process.env.QUEUE_ALL_FIELDS_REPORT_ID || "1268";
+const ANALYZER_REQUEST_TIMEOUT_MS = Number(process.env.ANALYZER_REQUEST_TIMEOUT_MS || 7000);
 
 function parseReportDurationSeconds(value) {
   if (value == null) return 0;
@@ -2045,16 +2046,28 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
     const url = `${ANALYZER_BASE_URL}${candidate.path}`;
     const startedAt = Date.now();
     try {
-      const response = await fetch(url, {
-        method: candidate.method,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json, text/plain, */*",
-          ...(candidate.method === "POST" ? { "Content-Type": "application/json" } : {})
-        },
-        ...(candidate.method === "POST" ? { body: JSON.stringify(candidate.body) } : {})
-      });
-      const text = await response.text();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => {
+        try { controller.abort(); } catch {}
+      }, ANALYZER_REQUEST_TIMEOUT_MS);
+
+      let response;
+      let text;
+      try {
+        response = await fetch(url, {
+          method: candidate.method,
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: "application/json, text/plain, */*",
+            ...(candidate.method === "POST" ? { "Content-Type": "application/json" } : {})
+          },
+          ...(candidate.method === "POST" ? { body: JSON.stringify(candidate.body) } : {})
+        });
+        text = await response.text();
+      } finally {
+        clearTimeout(timeout);
+      }
       const contentType = response.headers.get("content-type") || "";
       let json = null;
       if (contentType.includes("json") || text.trim().startsWith("{") || text.trim().startsWith("[")) {
@@ -2070,6 +2083,7 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
         status: response.status,
         contentType,
         durationMs: Date.now() - startedAt,
+        timeoutMs: ANALYZER_REQUEST_TIMEOUT_MS,
         rowCount: rows.length,
         preview: String(text || "").slice(0, 500)
       });
@@ -2103,7 +2117,8 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
         method: candidate.method,
         ok: false,
         error: err?.message || String(err),
-        durationMs: Date.now() - startedAt
+        durationMs: Date.now() - startedAt,
+        timeoutMs: ANALYZER_REQUEST_TIMEOUT_MS
       });
     }
   }
