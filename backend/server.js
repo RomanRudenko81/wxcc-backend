@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v60-visible-build-version-2026-05-29";
+const BUILD_ID = "wxcc-widget-v61-graphql-kpi-route-only-2026-05-29";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -1904,10 +1904,8 @@ function isWebhookSecretValid(req) {
 
 
 
-// v58 isolated Analyzer KPI route. This endpoint is optional for the frontend and must not affect SSE/wallboard behavior.
-const ANALYZER_BASE_URL = process.env.ANALYZER_BASE_URL || "https://analyzer-v2.wxcc-eu2.cisco.com";
-const QUEUE_ALL_FIELDS_REPORT_ID = process.env.QUEUE_ALL_FIELDS_REPORT_ID || "1268";
-const ANALYZER_REQUEST_TIMEOUT_MS = Number(process.env.ANALYZER_REQUEST_TIMEOUT_MS || 8000);
+// v61 isolated KPI route. Uses WXCC Search GraphQL task aggregations only. No Analyzer report REST calls.
+const KPI_REQUEST_TIMEOUT_MS = Number(process.env.KPI_REQUEST_TIMEOUT_MS || 8000);
 
 function getMetricRange(value = "60m") {
   const key = String(value || "60m").toLowerCase();
@@ -2014,7 +2012,7 @@ function buildAnalyzerDurationFilter(range = "60m") {
   return { label: "Last 60 minutes", duration: "LAST_60_MINUTES", analyzerDuration: "Last 60 Minutes" };
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = ANALYZER_REQUEST_TIMEOUT_MS) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = KPI_REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -2024,7 +2022,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = ANALYZER_REQUEST_
   }
 }
 
-async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "60m", requestId = "" } = {}) {
+async function fetchQueueTaskAggregationMetrics({ selectedQueues = [], range = "60m", requestId = "" } = {}) {
   const token = await getValidServiceToken();
   const rangeInfo = getMetricRange(range);
   const normalizedSelectedQueues = selectedQueues.map(q => normalizeText(q)).filter(Boolean);
@@ -2068,7 +2066,7 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
       Accept: "application/json"
     },
     body: JSON.stringify({ query, variables })
-  }, ANALYZER_REQUEST_TIMEOUT_MS);
+  }, KPI_REQUEST_TIMEOUT_MS);
 
   const text = await response.text();
   let json = null;
@@ -2088,7 +2086,6 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
     return {
       ok: false,
       source: "wxcc-search-task-aggregation",
-      reportId: "task-aggregation-call-stats-by-queue",
       durationFilter: buildAnalyzerDurationFilter(range),
       attempts: [attempt],
       error: json?.error || json?.errors || `HTTP ${response.status}`
@@ -2121,26 +2118,37 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
     : rows;
 
   const effectiveRows = selectedRows.length ? selectedRows : rows;
+
+  if (!effectiveRows.length) {
+    return {
+      ok: true,
+      source: "wxcc-search-task-aggregation",
+      durationFilter: buildAnalyzerDurationFilter(range),
+      selectedRow: {
+        queueName: normalizedSelectedQueues.length ? selectedQueues.join(",") : "All",
+        totalContacts: 0,
+        averageQueueTimeMs: 0,
+        maximumQueueTimeMs: 0,
+        averageHandleTimeMs: 0,
+        rows: []
+      },
+      metrics: {
+        longestWaitingSeconds: 0,
+        avgWaitSeconds: 0,
+        avgHandleSeconds: 0
+      },
+      attempts: [{ ...attempt, rowCount: rows.length, selectedRowCount: 0, noRows: true }],
+      notes: ["No task aggregation rows returned for selected range/queue; returning zero KPI values."]
+    };
+  }
+
   const totalContacts = effectiveRows.reduce((sum, row) => sum + Number(row.totalContacts || 0), 0);
   const weightedAverageMs = field => {
-    if (!effectiveRows.length) return 0;
     if (totalContacts > 0) {
       return effectiveRows.reduce((sum, row) => sum + (Number(row[field] || 0) * Number(row.totalContacts || 0)), 0) / totalContacts;
     }
     return effectiveRows.reduce((sum, row) => sum + Number(row[field] || 0), 0) / effectiveRows.length;
   };
-
-  if (!effectiveRows.length) {
-    return {
-      ok: false,
-      source: "wxcc-search-task-aggregation",
-      reportId: "task-aggregation-call-stats-by-queue",
-      durationFilter: buildAnalyzerDurationFilter(range),
-      attempts: [{ ...attempt, rowCount: rows.length }],
-      rows,
-      notes: ["No task aggregation rows returned for selected range/queue."]
-    };
-  }
 
   const avgQueueMs = weightedAverageMs("avgQueueMs");
   const avgHandleMs = weightedAverageMs("avgHandleMs");
@@ -2149,7 +2157,6 @@ async function fetchQueueAllFieldsReportMetrics({ selectedQueues = [], range = "
   return {
     ok: true,
     source: "wxcc-search-task-aggregation",
-    reportId: "task-aggregation-call-stats-by-queue",
     durationFilter: buildAnalyzerDurationFilter(range),
     selectedRow: {
       queueName: effectiveRows.length === 1 ? effectiveRows[0].queueName : "Multiple/All",
@@ -2185,26 +2192,25 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
     const requestedQueues = String(req.query?.queues || "").split(",").map(v => v.trim()).filter(Boolean);
     const selectedQueues = requestedQueues.length ? requestedQueues.filter(q => queueNameAllowed(q, allowedQueues)) : allowedQueues;
 
-    const analyzerResult = await fetchQueueAllFieldsReportMetrics({ selectedQueues, range: range.range, requestId });
-    if (analyzerResult.ok) {
+    const kpiResult = await fetchQueueTaskAggregationMetrics({ selectedQueues, range: range.range, requestId });
+    if (kpiResult.ok) {
       const payload = {
         ok: true,
         backendBuildId: BUILD_ID,
         requestId,
-        source: analyzerResult.source,
-        reportId: analyzerResult.reportId,
-        range: range.range,
-        durationFilter: analyzerResult.durationFilter,
+        source: kpiResult.source,
+                range: range.range,
+        durationFilter: kpiResult.durationFilter,
         from: range.from,
         to: range.to,
         generatedAt: new Date().toISOString(),
         queues: selectedQueues,
-        metrics: analyzerResult.metrics,
-        reportFields: analyzerResult.selectedRow,
+        metrics: kpiResult.metrics,
+        reportFields: kpiResult.selectedRow,
         sample: {
           source: "WXCC Search task aggregations",
           durationMs: Date.now() - startedAt,
-          attempts: analyzerResult.attempts.map(a => ({ path: a.path, method: a.method, ok: a.ok, status: a.status, rowCount: a.rowCount || 0, durationMs: a.durationMs }))
+          attempts: kpiResult.attempts.map(a => ({ path: a.path, method: a.method, ok: a.ok, status: a.status, rowCount: a.rowCount || 0, durationMs: a.durationMs }))
         }
       };
       addWidgetDiagLog("analytics-task-aggregation-success", {
@@ -2222,15 +2228,14 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       requestId,
       range: range.range,
       queues: selectedQueues,
-      attempts: analyzerResult.attempts
+      attempts: kpiResult.attempts
     });
     return res.status(503).json({
       ok: false,
       backendBuildId: BUILD_ID,
       requestId,
       source: "wxcc-search-task-aggregation",
-      reportId: analyzerResult.reportId,
-      searchUnavailable: true,
+            searchUnavailable: true,
       range: range.range,
       durationFilter: buildAnalyzerDurationFilter(range.range),
       from: range.from,
@@ -2239,7 +2244,7 @@ app.get("/api/analytics/queue-metrics", requireSession, async (req, res) => {
       queues: selectedQueues,
       metrics: null,
       reportFields: null,
-      attempts: analyzerResult.attempts
+      attempts: kpiResult.attempts
     });
   } catch (err) {
     addWidgetDiagLog("analytics-queue-metrics-error", { requestId, error: err?.stack || err?.message || String(err), durationMs: Date.now() - startedAt });
