@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v61-graphql-kpi-route-only-2026-05-29";
+const BUILD_ID = "wxcc-widget-v62-connected-duration-kpi-colors-2026-05-29";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -2044,7 +2044,7 @@ async function fetchQueueTaskAggregationMetrics({ selectedQueues = [], range = "
           { field: "id", type: count, name: "Total Contacts by Queue" }
           { field: "queueDuration", type: average, name: "Average Queue Time" }
           { field: "queueDuration", type: max, name: "Maximum Queue Time" }
-          { field: "totalDuration", type: average, name: "Average Handle Time by Queue" }
+          { field: "connectedDuration", type: average, name: "Average Handle Time by Queue" }
         ]
       ) {
         tasks {
