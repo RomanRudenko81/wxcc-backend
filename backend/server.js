@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v59-graphql-task-aggregation-kpis-2026-05-22";
+const BUILD_ID = "wxcc-widget-v60-visible-build-version-2026-05-29";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -467,6 +467,8 @@ function getDisplayState(agent) {
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
+    buildId: BUILD_ID,
+    version: BUILD_ID,
     entryPointId: ENTRY_POINT_ID,
     activeSessions: sessions.size,
     sessionTtlMs: SESSION_TTL_MS,
