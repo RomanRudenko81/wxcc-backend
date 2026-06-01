@@ -48,7 +48,7 @@ const WEBEX_SERVICE_REFRESH_TOKEN = process.env.WEBEX_SERVICE_REFRESH_TOKEN;
 
 const ENTRY_POINT_ID = process.env.ENTRY_POINT_ID || "284cd09a-eef4-40a2-82c6-53d08705e3e3";
 const PORT = process.env.PORT || 3000;
-const BUILD_ID = "wxcc-widget-v65-kpi-initial-default-once-2026-05-29";
+const BUILD_ID = "wxcc-widget-v66-waiting-calls-hotfix-2026-06-01";
 
 const widgetDiagLog = [];
 const WIDGET_DIAG_LOG_MAX = 2000;
@@ -961,6 +961,12 @@ const ACTIVE_CALL_EVENT_CACHE_TTL_MS = Number(process.env.ACTIVE_CALL_EVENT_CACH
 const ACTIVE_CALL_EVENT_EVICTION_DELAY_MS = Number(process.env.ACTIVE_CALL_EVENT_EVICTION_DELAY_MS || 30000);
 const activeCallEventCache = new Map();
 
+// v66: Waiting-call event cache. Some WXCC Search snapshots do not expose a queued/ringing
+// contact until it becomes connected. Keep a small event-derived waiting cache from
+// task:connect and remove it as soon as the same task becomes connected/terminal.
+const WAITING_CALL_EVENT_CACHE_TTL_MS = Number(process.env.WAITING_CALL_EVENT_CACHE_TTL_MS || 600000);
+const waitingCallEventCache = new Map();
+
 function getEventTaskId(data = {}) {
   return String(
     data.taskId ||
@@ -990,6 +996,137 @@ function getEventCaller(data = {}) {
 
 function getEventDestination(data = {}) {
   return String(data.destination || data.to || data.dnis || data.calledNumber || "");
+}
+
+function getEventQueueId(data = {}) {
+  const q = data.queue || data.lastQueue || data.firstQueue || data.queueInfo || {};
+  return String(data.queueId || data.lastQueueId || data.firstQueueId || q.id || q.queueId || q.uuid || "");
+}
+
+function resolveQueueNameFromEvent(data = {}, allowedQueues = []) {
+  const eventQueueName = getEventQueueName(data);
+  if (eventQueueName) return eventQueueName;
+
+  const queueId = getEventQueueId(data);
+  if (queueId && accessConfigCache?.queues?.length) {
+    const match = accessConfigCache.queues.find(queue => String(queue.id || "") === queueId);
+    if (match?.name) return match.name;
+  }
+
+  return Array.isArray(allowedQueues) && allowedQueues.length === 1 ? allowedQueues[0] : "";
+}
+
+function pruneWaitingCallEventCache() {
+  const now = Date.now();
+  for (const [id, call] of waitingCallEventCache.entries()) {
+    const lastSeen = Number(call.lastSeenMs || call.createdTime || 0);
+    if (!lastSeen || now - lastSeen > WAITING_CALL_EVENT_CACHE_TTL_MS || call.endedAtMs) {
+      waitingCallEventCache.delete(id);
+    }
+  }
+}
+
+function rememberWaitingCallFromWxccEvent(body = {}) {
+  const normalized = normalizeWxccEventBody(body);
+  const type = String(normalized.type || "");
+  const data = normalized.data || {};
+  const taskId = getEventTaskId(data);
+  if (!taskId) return;
+
+  const state = String(data.currentState || data.state || data.status || "").toLowerCase();
+  const now = Date.now();
+
+  // task:connect is the earliest reliable signal for a queued/offered telephony contact.
+  if (type === "task:connect") {
+    waitingCallEventCache.set(taskId, {
+      id: taskId,
+      taskId,
+      status: "parked",
+      channelType: data.channelType || "telephony",
+      direction: data.direction || "INBOUND",
+      queueId: getEventQueueId(data),
+      queueName: getEventQueueName(data),
+      caller: getEventCaller(data),
+      destination: getEventDestination(data),
+      createdTime: data.createdTime || now,
+      lastSeenMs: now,
+      source: "wxcc-task-connect-event"
+    });
+    addWidgetDiagLog("waiting-call-event-cache-added", { taskId, queueId: getEventQueueId(data), queueName: getEventQueueName(data), cacheSize: waitingCallEventCache.size });
+    pruneWaitingCallEventCache();
+    return;
+  }
+
+  if (type === "agent:state_change") {
+    const existing = waitingCallEventCache.get(taskId);
+    if (!existing) return;
+
+    // Keep ringing/offered calls in Waiting Calls until they become connected.
+    if (state === "ringing") {
+      waitingCallEventCache.set(taskId, {
+        ...existing,
+        queueId: existing.queueId || getEventQueueId(data),
+        queueName: existing.queueName || getEventQueueName(data),
+        caller: existing.caller || getEventCaller(data),
+        destination: existing.destination || getEventDestination(data),
+        lastSeenMs: now,
+        eventState: state
+      });
+      addWidgetDiagLog("waiting-call-event-cache-ringing", { taskId, cacheSize: waitingCallEventCache.size });
+      return;
+    }
+
+    if (["connected", "wrapup", "wrapup-done", "available", "idle", "ended", "terminated", "disconnected"].includes(state)) {
+      waitingCallEventCache.delete(taskId);
+      addWidgetDiagLog("waiting-call-event-cache-removed", { taskId, state, cacheSize: waitingCallEventCache.size });
+    }
+  }
+
+  pruneWaitingCallEventCache();
+}
+
+function mergeWaitingTasksWithEventCache(waitingTasks = [], allowedQueues = []) {
+  pruneWaitingCallEventCache();
+  const byId = new Map();
+
+  for (const task of Array.isArray(waitingTasks) ? waitingTasks : []) {
+    const id = String(task?.id || task?.taskId || "");
+    if (id) byId.set(id, task);
+  }
+
+  for (const cached of waitingCallEventCache.values()) {
+    const id = String(cached?.taskId || cached?.id || "");
+    if (!id || byId.has(id)) continue;
+
+    const queueName = resolveQueueNameFromEvent({ queueId: cached.queueId, queueName: cached.queueName }, allowedQueues);
+    if (!queueNameAllowed(queueName, allowedQueues)) continue;
+
+    byId.set(id, {
+      id,
+      status: cached.status || "parked",
+      channelType: cached.channelType || "telephony",
+      isActive: true,
+      origin: cached.caller || "",
+      destination: cached.destination || "",
+      createdTime: cached.createdTime || cached.lastSeenMs || Date.now(),
+      lastActivityTime: cached.lastSeenMs || cached.createdTime || Date.now(),
+      queueDuration: 0,
+      connectedDuration: 0,
+      totalDuration: 0,
+      lastQueue: { id: cached.queueId || "", name: queueName },
+      firstQueueName: queueName,
+      lastEntryPoint: { id: "", name: "" },
+      lastAgent: { id: "", name: "" },
+      reconstructed: true,
+      reconstructedSource: cached.source || "waiting-event-cache"
+    });
+  }
+
+  const merged = Array.from(byId.values());
+  if (merged.length !== waitingTasks.length) {
+    addWidgetDiagLog("waiting-call-reconstruction-merged", { taskDetailsWaiting: waitingTasks.length, mergedWaiting: merged.length, eventCacheSize: waitingCallEventCache.size });
+  }
+  return merged;
 }
 
 function pruneActiveCallEventCache() {
@@ -1568,9 +1705,11 @@ async function buildWallboardPayload(session, forceRefresh = false) {
   const allowedQueueTasks = telephonyTasks
     .filter(t => queueNameAllowed(getQueueNameFromTask(t), allowedQueues));
 
-  const waitingTasks = allowedQueueTasks
+  let waitingTasks = allowedQueueTasks
     .filter(t => t?.isActive === true)
     .filter(t => ["new", "parked"].includes(String(t.status).toLowerCase()));
+
+  waitingTasks = mergeWaitingTasksWithEventCache(waitingTasks, allowedQueues);
 
   let connectedTasks = allowedQueueTasks.filter(
     t => String(t.status).toLowerCase() === "connected"
@@ -2403,6 +2542,7 @@ app.post("/api/wxcc/events", (req, res) => {
   };
 
   rememberAgentStateFromWxccEvent(lastWxccEvent.body);
+  rememberWaitingCallFromWxccEvent(lastWxccEvent.body);
   rememberActiveCallFromWxccEvent(lastWxccEvent.body);
 
   broadcastSseEvent("wxcc-event", {
